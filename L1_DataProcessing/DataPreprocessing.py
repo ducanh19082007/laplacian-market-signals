@@ -29,9 +29,6 @@ except ImportError:
 
 
 
-
-
-
 @dataclass
 class BrokerConfig:
     name: str
@@ -150,7 +147,7 @@ if __name__ == "__main__":
         payload_extractor=None,
     )
 
-    oanda = BrokerConfig(
+    oanda = BrokerConfig( #onlu BINANCE is real stuff, OANDA and IBKR is mock, that is why the execution OANDA and IBKR is fastly changed
         name="OANDA",
         stream_url="mock:oanda",
         pairs=[pair.lower() for pair in my_pairs],
