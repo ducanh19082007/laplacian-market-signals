@@ -1,133 +1,131 @@
 # FOREX_farming
 
-A real-time triangular arbitrage detector built on graph theory, spectral analysis, and stochastic modelling. Connects to live cryptocurrency exchange feeds, analyses market structure before searching for cycles, and logs opportunities with full risk metrics.
+A real-time, cross-venue market structure engine for cryptocurrency exchange rates. It builds a live directed graph of currency pairs across multiple brokers, analyses the graph's structure and dynamics, and turns that analysis into three concrete outputs: a market health signal, a per-pair regime classification, and engineered features for predictive trading models.
 
-> Currently built against Binance WebSocket streams (BTC, ETH, BNB, SOL) over a K4 complete graph — 6 live trading pairs, no central hub.
-
-
-## Disclaimer
-
-This project is a research and learning tool. Detected cycles are logged and analysed — not automatically traded. Real arbitrage on live exchanges is dominated by co-located HFT infrastructure. The value here is in the pattern analysis, not execution.
+> Currently streaming Binance (BTC, ETH, BNB, SOL) over a K4 intra-venue graph, with OANDA and IBKR wired in as mock feeds pending real broker integration.
 
 ---
 
 ## How it works
 
-Most arbitrage detectors run Bellman-Ford on the full exchange rate graph every tick and hope for the best. This project does something different: it analyses market *structure* first, uses that to prune the graph, and only then hunts for negative cycles — on a fraction of the original problem.
+Every tick, live order book data from multiple exchanges is assembled into a single directed graph where nodes are `(asset, venue)` pairs and edges are exchange rates — both within a venue (trading) and across venues (transferring). That graph is analysed two ways: structurally, via spectral graph theory, and dynamically, via a calibrated stochastic process fit to its history. Triangular and cross-venue arbitrage cycles are detected as a side effect of this analysis, not as the end goal.
 
-Each layer gates the next.
+The point of building it this way: the same underlying question — *how efficiently does this market correct itself when something pushes it out of equilibrium* — turns out to answer three different practical questions depending on how you frame it. That reframing is the actual subject of this README.
 
 ```mermaid
 flowchart TD
 
-    A["Real-Time FX Feed<br/>WebSockets"]
-    A --> B
+    A1["Binance<br/>WebSocket"]
+    A2["OANDA<br/>mock / planned live"]
+    A3["IBKR<br/>mock / planned live"]
+    A1 & A2 & A3 --> M
+
+    M["Multi-Venue Aggregator<br/>Order Book Sync"]
+    M --> B
 
     subgraph B["1. Data Preprocessing"]
-        B1["Construct FX Graph<br/>Aᵢⱼ = Rate(i → j)"]
+        B1["Construct Multi-Venue Graph<br/>Node: asset x venue"]
         B2["Log Transformation<br/>Wᵢⱼ = -ln(Aᵢⱼ)"]
         B1 --> B2
     end
 
     B --> C
+    C --> D
+    C --> F
 
     subgraph C["2. Market Structure Analysis"]
         C1["Graph Laplacian<br/>L = D - A"]
-        C2["Spectral Gap λ₂<br/>Fiedler Value → Market Health"]
-        C3["Tropical Eigenvalue λ_trop<br/>Upper Bound on Best Cycle"]
-        C4["Strain Analysis<br/>Deviation from No-Arb Equilibrium"]
+        C2["Spectral Gap λ₂<br/>Fiedler Value"]
+        C3["Tropical Eigenvalue<br/>Upper Bound on Best Cycle"]
+        C4["Strain<br/>Deviation from No-Arb Equilibrium"]
         C1 --> C2
         C1 --> C3
         C2 --> C4
     end
 
-    C --> D
-
     subgraph D["3. Spatial Graph Analysis"]
-        D1["Tarjan SCC<br/>Find Tradeable Subgraphs"]
-        D2["Spectral Embedding<br/>Currency Cluster Geometry"]
-        D3["Connectivity Metrics<br/>Centrality · Diameter · Clustering"]
-        D1 --> D3
-        D2 --> D3
+        D1["Tarjan SCC<br/>Tradeable Subgraphs"]
+        D2["Spectral Embedding"]
+        D1 --> D2
     end
 
-    C --> E
-    D --> E
-
-    subgraph E["4. Arbitrage Detection"]
-        E1["Bellman-Ford<br/>Negative Cycle Detection<br/>on SCC-pruned subgraphs"]
-        E2["Bid/Ask Spread Filter<br/>+ Order Book Depth Constraints"]
-        E3["Cycle Logger<br/>timestamp · profit% · path · duration"]
-        E1 --> E2
-        E2 --> E3
-    end
-
-    E3 -->|feedback| C
-
-    E --> F
-
-    subgraph F["5. Risk & Prediction Engine"]
-        F1["SDE Calibration<br/>dS = μSdt + σSdW"]
-        F2["Monte Carlo Simulation<br/>10,000+ Paths"]
-        F3["Latency-Aware Arb Probability"]
-        F4["Expected Profit Distribution"]
+    subgraph F["5. Regime & Risk Engine"]
+        F1["OU Calibration on Strain<br/>θ, μ, σ"]
+        F2["ADF Test<br/>Mean-Reverting vs Trending"]
+        F3["Monte Carlo<br/>Reversion Probability"]
         F1 --> F2
         F2 --> F3
-        F3 --> F4
     end
 
+    D --> E
+    F -->|gates: trust a cycle only if<br/>its pair is mean-reverting| E
+
+    subgraph E["4. Arbitrage Detection"]
+        E1["Bellman-Ford<br/>Negative Cycle Detection"]
+        E2["Cost Filter<br/>Spread + Depth + Transfer Fees"]
+        E1 --> E2
+    end
+
+    E --> G
     F --> G
+    C --> G
 
-    subgraph G["6. Execution Engine"]
-        G1["Async Workers<br/>Python Asyncio / Go"]
-        G2["Smart Order Routing"]
-        G3["Atomic Triangle Execution"]
-        G4["Execution Monitoring"]
-        G1 --> G2
-        G2 --> G3
-        G3 --> G4
-    end
+    G["Feature Store<br/>timestamped metrics + forward labels"]
+
+    G --> H1["Market Health<br/>Dashboard & Alerts"]
+    G --> H2["Regime Map<br/>per-pair classification"]
+    G --> H3["ML Model<br/>Trading Signal"]
+
+    H3 -.->|future| I["6. Execution Engine<br/>planned"]
 ```
+
+---
+
+## The Multi-Venue Graph Model
+
+Nodes are `(asset, venue)` pairs, not just assets — `BTC@Binance` and `BTC@Coinbase` are distinct nodes. Two edge types exist: intra-venue trading edges (`Wᵢⱼ = -ln(bid or 1/ask)`) and inter-venue transfer edges (`Wᵢⱼ = -ln(1 - transfer_fee)`). A profitable loop across both edge types — say, sell ETH for BTC on Binance, transfer BTC to Coinbase, sell BTC for ETH, transfer back — only beats the combined trading and transfer fees if the price gap between venues is large enough. Cross-venue cycles are also gated by transfer latency: on-chain settlement can take seconds to minutes, by which point the gap that created the opportunity is often gone, which is why pre-funded balances on every venue (collapsing the transfer leg to zero-latency internal accounting) are the practical way this would ever be exploitable.
 
 ---
 
 ## Architecture
 
 ### Layer 1 — Data Preprocessing
-
-Raw WebSocket tick data arrives as bid/ask order book snapshots. Each tick constructs a directed FX graph where every edge `Aᵢⱼ` is the exchange rate going from asset `i` to asset `j` — using the best bid when selling, `1/ask` when buying. The graph is then log-transformed into weight matrix `W`, where `Wᵢⱼ = -ln(Aᵢⱼ)`. This turns the multiplicative arbitrage problem into an additive one: a profitable loop (product of rates > 1) becomes a negative-weight cycle in `W`.
+Order books from every connected venue are merged into one unified state keyed by `(asset, venue)`. Intra-venue and inter-venue edges are constructed each tick and log-transformed into weight matrix `W`, turning the multiplicative arbitrage problem into an additive one: a profitable loop becomes a negative-weight cycle.
 
 ### Layer 2 — Market Structure Analysis
-
-Before searching for anything, the market is assessed for whether it is even worth searching. Three signals are computed from the Graph Laplacian `L = D - A`:
-
-**Spectral Gap (λ₂ — Fiedler value)** is the second-smallest eigenvalue of L. A high value means the market is well-connected and rates propagate quickly — arbitrage closes fast. A low value means the graph is fragmented or under stress, and any cycles that appear may be *persistent* rather than transient. Low λ₂ is the interesting regime.
-
-**Tropical Eigenvalue (λ_trop)** comes from max-plus algebra and gives the minimum mean cycle weight across the entire graph — a mathematical upper bound on the best arbitrage rate achievable. If λ_trop ≥ 0, no profitable cycle can exist this tick and detection is skipped entirely.
-
-**Strain** measures how far the observed rate network deviates from the no-arbitrage equilibrium — the state where every closed loop has a product of exactly 1 (i.e. sum of W around any cycle = 0). High strain means large mispricing somewhere in the graph. Strain is continuously updated via feedback from the Cycle Logger, creating a self-calibrating health signal.
+Three structural signals come from the Graph Laplacian `L = D - A`. The spectral gap `λ₂` (second-smallest Laplacian eigenvalue) measures how well-connected the market is right now — high means mispricing propagates and closes quickly, low means the graph is fragmented and deviations may persist. The tropical eigenvalue gives a hard upper bound on the best possible arbitrage rate, letting detection be skipped entirely when no profitable cycle can exist. Strain measures how far the observed graph deviates from the no-arbitrage equilibrium where every cycle's product equals 1.
 
 ### Layer 3 — Spatial Graph Analysis
-
-Structure tells you the *health* of the market; spatial analysis tells you *where* to look. Tarjan's algorithm finds Strongly Connected Components — the subsets of assets where every node can reach every other node via directed edges. Any pair with no liquid market drops out of the SCC and is never touched by Bellman-Ford. Spectral embedding then projects the remaining nodes into a low-dimensional geometry using the eigenvectors of L, surfacing which currency clusters move together and making structural breaks visually detectable. Connectivity metrics (centrality, diameter, clustering coefficient) are computed on the pruned graph and exposed as runtime diagnostics.
+Tarjan's algorithm finds Strongly Connected Components, pruning the graph down to only the subsets where a closed trading loop is actually possible — illiquid pairs and disconnected venues drop out before Bellman-Ford ever runs. Spectral embedding projects the remaining nodes into low-dimensional space, surfacing which venues and assets cluster together.
 
 ### Layer 4 — Arbitrage Detection
+Bellman-Ford runs only on the SCC-pruned subgraph, and only on cycles that Layer 5 confirms are sitting in a statistically mean-reverting regime — a cycle in a trending or random-walk regime might widen instead of close, so detecting a negative cycle there is not the same thing as having found real arbitrage. Surviving cycles pass a cost filter (spread, depth, transfer fees) and are written to the Feature Store with their full path and profit.
 
-Bellman-Ford runs only on the SCC-pruned subgraphs passed up from Layer 3, and only when Layer 2's tropical eigenvalue confirms a negative cycle is mathematically possible. Every detected cycle is passed through a bid/ask spread filter and order book depth check — if the cycle profit does not survive realistic fill costs, it is discarded. Surviving cycles are written to the Cycle Logger with their full path, gross and net profit percentage, and timestamp. Logged data feeds back into Layer 2's strain computation.
-
-### Layer 5 — Risk & Prediction Engine
-
-A stochastic differential equation `dS = μSdt + σSdW` is calibrated from recent rate history for each asset pair. 10,000+ Monte Carlo paths are simulated forward to estimate the probability that a detected cycle remains open long enough to execute, given observed latency. The output is an expected profit distribution — not a single number, but a full picture of the range of outcomes before a trade is committed.
+### Layer 5 — Regime & Risk Engine
+Strain is not assumed to be a random walk — it's modelled as an Ornstein-Uhlenbeck process, `dX = θ(μ - X)dt + σdW`, which is the correct model for a quantity that gets pulled back toward an equilibrium rather than wandering freely. Calibrating θ, μ, and σ from the strain history gives a statistically grounded read on how fast this market self-corrects. An Augmented Dickey-Fuller test confirms whether that mean reversion is real or just noise, classifying each pair into a mean-reverting or trending regime — this is what gates Layer 4. Monte Carlo paths from the calibrated process then produce probabilistic features: probability of reversion within N seconds, expected time-to-reversion, and quantile-based risk bounds.
 
 ### Layer 6 — Execution Engine *(planned)*
+Async order routing and atomic cross-leg execution, built only on signals that have cleared the regime gate and the feature store's validation. Not the current focus.
 
-Async workers fire coordinated orders across the legs of the cycle simultaneously. Smart order routing selects between limit and market orders based on depth. Atomic triangle execution ensures all three legs are treated as a single logical operation — a partial fill on one leg triggers cancellation of the others. Execution monitoring tracks slippage and feeds realised P&L back into the Monte Carlo calibration.
+---
+
+## What this project can actually deliver
+
+Three concrete things come out of this pipeline, and they're not independent products bolted together — they're the same underlying measurement (how efficiently this market self-corrects) read at three different resolutions.
+
+**Market health.** The spectral gap and strain, tracked against a rolling baseline, tell you whether the market is currently well-connected or fragmented — a live diagnostic, alertable when a venue or asset cluster starts diverging from its normal behaviour. This is the snapshot view: is the market okay right now.
+
+**Regime classification.** Calibrating θ per pair and validating it with an ADF test tells you whether that specific pair is currently mean-reverting (efficient, deviations correct) or trending (inefficient, deviations persist or grow). This is the time-series view: what kind of market behaviour is this pair exhibiting, and is a detected arbitrage cycle even likely to close. It's also what separates this project from a naive scanner — a negative cycle only means something once the regime confirms it's the closing kind.
+
+**Trading signals.** Every structural metric, regime classification, and detected cycle gets logged into a timestamped feature store, alongside forward-looking labels (realised return, or probability of reversion within a horizon). That dataset is the input to a predictive model — the spectral and regime metrics stop being descriptive and become engineered features with a testable claim: does market structure predict what happens next.
+
+The interesting part is where these three disagree. If the graph looks structurally healthy but θ shows a pair isn't actually reverting, that mismatch — not either metric alone — is the most informative signal the system produces.
 
 ---
 
 ## The math in one paragraph
 
-Taking the log of exchange rates converts triangular arbitrage from a multiplicative to an additive problem. A loop `i → j → k → i` is profitable when `Aᵢⱼ · Aⱼₖ · Aₖᵢ > 1`, which after log-transform becomes `Wᵢⱼ + Wⱼₖ + Wₖᵢ < 0` — a negative-weight cycle. Bellman-Ford detects these in O(VE) time. The spectral gap of the Laplacian controls how quickly such mispricings diffuse through the network; the tropical eigenvalue bounds how profitable the best cycle can be without running detection at all; and Tarjan SCC ensures the algorithm only operates on the reachable, liquid portion of the graph.
+Taking the log of exchange rates converts triangular arbitrage from a multiplicative to an additive problem: a loop is profitable when `Aᵢⱼ · Aⱼₖ · Aₖᵢ > 1`, equivalently `Wᵢⱼ + Wⱼₖ + Wₖᵢ < 0`, a negative-weight cycle Bellman-Ford finds in O(VE) time. The spectral gap of the graph Laplacian measures how fast such mispricings diffuse and close structurally; the tropical eigenvalue bounds the best achievable cycle without running detection at all; Tarjan SCC restricts search to the reachable, liquid portion of the graph. Separately, modelling strain as an Ornstein-Uhlenbeck process and testing it with Augmented Dickey-Fuller gives a second, independent estimate of the same efficiency concept — this time from the time-series dynamics rather than the graph's structure — and the two together produce more than either alone: a cross-validated read on whether the market is genuinely self-correcting right now.
 
 ---
 
@@ -135,14 +133,18 @@ Taking the log of exchange rates converts triangular arbitrage from a multiplica
 
 | Layer | Status |
 |---|---|
-| WebSocket feed + order book dashboard | ✅ Done |
-| K4 graph construction (6 live pairs) | ✅ Done |
+| WebSocket feed + order book dashboard (Binance) | ✅ Done |
+| K4 intra-venue graph (6 live pairs) | ✅ Done |
+| Multi-broker aggregator (Binance live, OANDA/IBKR mock) | ✅ Done |
 | FX graph + log transform | ✅ Done |
 | Bellman-Ford cycle detection | ✅ Done |
-| Spectral / structural analysis | 🔧 In progress |
+| Multi-venue graph (asset × venue nodes, transfer edges) | 📋 Planned |
+| Spectral structure (Laplacian, λ₂, tropical eigenvalue, strain) | 🔧 In progress |
 | Spatial analysis + SCC pruning | 🔧 In progress |
-| Cycle Logger | 🔧 In progress |
-| Risk & Monte Carlo engine | 📋 Planned |
+| OU calibration + ADF regime classification | 📋 Planned |
+| Regime-gated arbitrage detection | 📋 Planned |
+| Feature store + forward labels | 📋 Planned |
+| ML model / signal validation | 📋 Planned |
 | Execution engine | 📋 Planned |
 
 ---
@@ -150,9 +152,13 @@ Taking the log of exchange rates converts triangular arbitrage from a multiplica
 ## Stack
 
 - **Python** — core pipeline, asyncio event loop
-- **websockets** — Binance real-time order book feed
-- **numpy / scipy** — Laplacian construction, eigenvalue computation
-- **Go** *(planned)* — execution layer for sub-millisecond order dispatch
+- **websockets** — multi-venue order book feeds
+- **numpy / scipy** — Laplacian construction, eigenvalue computation, OU calibration
+- **statsmodels** *(planned)* — Augmented Dickey-Fuller test for regime classification
+- **Go** *(planned)* — execution layer for sub-millisecond order dispatch per venue
 
 ---
 
+## Disclaimer
+
+This is a research and feature-engineering tool, not an automated trading system. Detected cycles and regime classifications are logged for analysis, not executed. Live execution at retail scale competes against co-located, microsecond-latency infrastructure that this project has no intention of trying to beat — the value here is in the structural and statistical analysis, and in producing a defensible, testable dataset, not in chasing fleeting price gaps.
