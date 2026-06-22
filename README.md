@@ -16,8 +16,8 @@ The point of building it this way: the same underlying question — *how efficie
 flowchart TD
 
     A1["Binance<br/>WebSocket"]
-    A2["OANDA<br/>mock / planned live"]
-    A3["IBKR<br/>mock / planned live"]
+    A2["Coinbase Advanced<br/>API"]
+    A3["Kraken<br/>API"]
     A1 & A2 & A3 --> M
 
     M["Multi-Venue Aggregator<br/>Order Book Sync"]
