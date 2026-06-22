@@ -1,4 +1,6 @@
 import time
+import shutil
+from collections import deque
 from dataclasses import dataclass
 from itertools import combinations
 from typing import Dict, List, Optional, Any
@@ -7,8 +9,10 @@ import json
 
 try:
     from .IngestionPipeline import OrderBookDashboard
+    from .DataProcessing import ExchangeRateGraph
 except ImportError:
     from IngestionPipeline import OrderBookDashboard
+    from DataProcessing import ExchangeRateGraph
 
 
 # NOTE: Binance and Coinbase Advanced Trade use real WebSocket depth/book streams.
@@ -29,9 +33,18 @@ class BrokerConfig:
 
 
 class MultiBrokerOrderBook:
-    def __init__(self, brokers: List[BrokerConfig], refresh_interval: float = 0.5):
+    def __init__(
+        self,
+        brokers: List[BrokerConfig],
+        refresh_interval: float = 0.5,
+        assets: Optional[List[str]] = None,
+        transfer_cost: float = 0.0,
+    ):
         self.dashboards = []
         self.refresh_interval = refresh_interval
+        # assets enables the live graph view; without it run_live() just shows the table.
+        self.assets = [a.lower() for a in assets] if assets else None
+        self.transfer_cost = transfer_cost
 
         for broker in brokers:
             dashboard = OrderBookDashboard(
@@ -106,17 +119,158 @@ class MultiBrokerOrderBook:
             row.append(str(aggregated["best_ask"]).ljust(column_width))
             print(" | ".join(row))
 
-    def run_live(self) -> None:
+    def build_graph(self) -> Optional["ExchangeRateGraph"]:
+        """Reshape the current snapshot into a log-weighted exchange-rate graph."""
+        if not self.assets:
+            return None
+        graph = ExchangeRateGraph(self.assets, transfer_cost=self.transfer_cost)
+        graph.build_from_snapshot(self.snapshot())
+        graph.log_transform()
+        return graph
+
+    def print_arbitrage(self) -> None:
+        """Build the graph from the live snapshot and report any arbitrage cycle."""
+        graph = self.build_graph()
+        if graph is None:
+            return
+        print("\n--- Graph (asset x venue) Arbitrage ---")
+        cycle = graph.find_arbitrage()
+        if cycle:
+            path = " -> ".join(ExchangeRateGraph.fmt(n) for n in cycle)
+            ret = graph.cycle_return(cycle)
+            print(f"Cycle : {path}")
+            print(f"Return: {ret:.8f}  ({(ret - 1) * 100:+.4f}%)")
+        else:
+            print("No arbitrage cycle (market is arb-free or feed still warming up).")
+
+    def run_live(self, clear_screen: bool = True) -> None:
+        """
+        Refresh the order-book table each tick.
+
+        clear_screen=True wipes the terminal every tick (snapshot view).
+        Set it False if you want the table to scroll and accumulate instead.
+        """
         try:
             while True:
-                print("\033[H\033[J", end="")
+                if clear_screen:
+                    print("\033[H\033[J", end="")
                 print(f"--- Multi-Broker Order Book ({time.strftime('%H:%M:%S')}) ---")
                 self.print_table()
+                self.print_arbitrage()
                 time.sleep(self.refresh_interval)
         except KeyboardInterrupt:
             for _, dashboard in self.dashboards:
                 dashboard.is_running = False
             print("\nMulti-broker monitoring stopped.")
+
+    def _exchange_rate_box(self) -> List[str]:
+        """
+        Render the current best exchange rate per pair as a bordered box
+        (list of equal-width lines), refreshed from the live snapshot.
+        """
+        rows = []
+        for pair in self.get_all_pairs():
+            agg = self.aggregate_best_prices(pair)
+            rows.append((pair.upper(), str(agg["best_bid"]), str(agg["best_ask"])))
+
+        pair_w = max([len(r[0]) for r in rows] + [len("PAIR")])
+        bid_w = max([len(r[1]) for r in rows] + [len("BEST BID")])
+        ask_w = max([len(r[2]) for r in rows] + [len("BEST ASK")])
+
+        title = f"LIVE EXCHANGE RATES  {time.strftime('%H:%M:%S')}"
+        header = f"{'PAIR'.ljust(pair_w)}  {'BEST BID'.ljust(bid_w)}  {'BEST ASK'.ljust(ask_w)}"
+        inner_w = max(len(title), len(header))
+
+        lines = ["┌─" + "─" * inner_w + "─┐",
+                 "│ " + title.ljust(inner_w) + " │",
+                 "├─" + "─" * inner_w + "─┤",
+                 "│ " + header.ljust(inner_w) + " │"]
+        for pair, bid, ask in rows:
+            body = f"{pair.ljust(pair_w)}  {bid.ljust(bid_w)}  {ask.ljust(ask_w)}"
+            lines.append("│ " + body.ljust(inner_w) + " │")
+        lines.append("└─" + "─" * inner_w + "─┘")
+        return lines
+
+    @staticmethod
+    def _render_side_by_side(left: List[str], right: List[str], gap: int = 4) -> str:
+        """Lay two blocks of lines next to each other, right block truncated to fit."""
+        left_w = max((len(l) for l in left), default=0)
+        term_w = shutil.get_terminal_size((120, 40)).columns
+        right_w = max(term_w - left_w - gap, 10)
+
+        out = []
+        for i in range(max(len(left), len(right))):
+            l = (left[i] if i < len(left) else "").ljust(left_w)
+            r = right[i] if i < len(right) else ""
+            if len(r) > right_w:
+                r = r[: right_w - 1] + "…"
+            out.append(l + " " * gap + r)
+        return "\n".join(out)
+
+    def stream_arbitrage(
+        self,
+        only_on_change: bool = True,
+        show_box: bool = True,
+        history: int = 20,
+    ) -> None:
+        """
+        Continuous arbitrage feed.
+
+        Both modes clear the screen every tick so old text never accumulates.
+        show_box=False -> redraw a plain header + the last `history` detections.
+        show_box=True  -> redraw a live exchange-rate box on the left and the
+                          most recent `history` detections on the right, so the
+                          rates update in place beside the loop.
+
+        only_on_change=True records a detection only when the cycle changes,
+        so the list grows only on genuinely new opportunities. The detections
+        deque keeps a sliding window of the last `history` lines (oldest rolls
+        off as new ones arrive).
+        """
+        if not self.assets:
+            print("stream_arbitrage needs `assets` set on the order book.")
+            return
+
+        log: deque = deque(maxlen=history)
+        last_signature = None
+        try:
+            while True:
+                graph = self.build_graph()
+                new_line = None
+                if graph is not None:
+                    cycle = graph.find_arbitrage()
+                    if cycle:
+                        signature = tuple(cycle)
+                        if not only_on_change or signature != last_signature:
+                            ret = graph.cycle_return(cycle)
+                            path = " -> ".join(ExchangeRateGraph.fmt(n) for n in cycle)
+                            new_line = (
+                                f"[{time.strftime('%H:%M:%S')}] "
+                                f"{(ret - 1) * 100:+.4f}%  ({ret:.8f})  {path}"
+                            )
+                            last_signature = signature
+                    else:
+                        last_signature = None
+
+                if new_line:
+                    log.append(new_line)
+
+                # Clear the screen every tick so previous frames never pile up.
+                print("\033[H\033[J", end="")
+                if show_box:
+                    right = ["ARBITRAGE DETECTIONS", "-" * 20]
+                    right += list(log) if log else ["(none yet)"]
+                    print(self._render_side_by_side(self._exchange_rate_box(), right))
+                else:
+                    print(f"--- Live Arbitrage Stream (refresh {self.refresh_interval}s, Ctrl-C to stop) ---")
+                    for line in (log or ["(none yet)"]):
+                        print(line)
+
+                time.sleep(self.refresh_interval)
+        except KeyboardInterrupt:
+            for _, dashboard in self.dashboards:
+                dashboard.is_running = False
+            print("\nArbitrage stream stopped.")
 
 
 class URL_methods:
@@ -444,5 +598,15 @@ if __name__ == "__main__":
     print(f"Coinbase subscription:\n{json.dumps(coinbase_sub, indent=2)}\n")
     print(f"Kraken subscription:\n{json.dumps(kraken_sub, indent=2)}\n")
 
-    multi_broker = MultiBrokerOrderBook(broker_configs, refresh_interval=0.5)
-    multi_broker.run_live()
+    multi_broker = MultiBrokerOrderBook(
+        broker_configs,
+        refresh_interval=0.05,
+        assets=assets,          # enables the live (asset x venue) graph + arbitrage view
+    )
+
+    # Live exchange-rate box on the left + arbitrage detections on the right.
+    # Set show_box=False for a plain scrolling arbitrage log instead.
+    multi_broker.stream_arbitrage(only_on_change=True, show_box=True)
+
+    # Snapshot order-book table instead (clears the screen each tick):
+    # multi_broker.run_live()
