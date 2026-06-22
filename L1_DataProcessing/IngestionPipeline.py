@@ -28,10 +28,17 @@ class OrderBookDashboard:
         payload_extractor: Optional[PayloadExtractor] = None,
         initial_message: Optional[Any] = None,
         debug=False,
+        max_quote_age: Optional[float] = None,
     ):
         self.pairs = [self._normalize_symbol(p) for p in pairs]
         self.refresh_interval = refresh_interval
         self.order_books: Dict[str, Dict[str, Any]] = {}
+        # Wall-clock time each book key was last updated, for staleness checks.
+        # A venue only ticks when a WS message arrives, so without this a lagging
+        # venue keeps serving a stale quote that shows up as phantom arbitrage.
+        self.order_book_ts: Dict[str, float] = {}
+        # Quotes older than this (seconds) are treated as N/A. None = never expire.
+        self.max_quote_age = max_quote_age
         self.is_running = True
         self.stream_url = stream_url
         self.broker_name = broker_name
@@ -102,9 +109,19 @@ class OrderBookDashboard:
                     if self.debug:
                         print(f"[{self.broker_name}] connected to {self.stream_url}")
                     if self.initial_message is not None:
-                        await ws.send(json.dumps(self.initial_message))
-                        if self.debug:
-                            print(f"[{self.broker_name}] sent initial subscription: {self.initial_message}")
+                        # A list means "send each message in turn" -- some venues
+                        # (e.g. Bitstamp) require one subscribe frame per channel,
+                        # while others (Kraken/OKX/Coinbase/Gemini) batch every
+                        # symbol into a single frame. Both are handled here.
+                        messages = (
+                            self.initial_message
+                            if isinstance(self.initial_message, list)
+                            else [self.initial_message]
+                        )
+                        for msg in messages:
+                            await ws.send(json.dumps(msg))
+                            if self.debug:
+                                print(f"[{self.broker_name}] sent initial subscription: {msg}")
                     while self.is_running:
                         try:
                             raw_data = await ws.recv()
@@ -115,6 +132,7 @@ class OrderBookDashboard:
                                 key, payload = result
                                 normalized_key = self._normalize_symbol(key)
                                 self.order_books[normalized_key] = payload
+                                self.order_book_ts[normalized_key] = time.time()
                             elif self.debug:
                                 print(f"[{self.broker_name}] ignored message: {data}")
                         except Exception as exc:
@@ -149,19 +167,61 @@ class OrderBookDashboard:
         asyncio.set_event_loop(loop)
         loop.run_until_complete(self._listen())
 
-    def get_best_prices(self, pair_name):
+    def get_top_of_book(self, pair_name):
+        """
+        Best bid/ask AND their sizes, honoring the same exact-match + max_quote_age
+        rules as get_best_prices. Returns (bid, bid_size, ask, ask_size); any field
+        that has no fresh quote is "N/A".
+
+        Size is what lets the arbitrage graph reject a mispriced top-of-book that's
+        only good for a trivial amount -- the dominant source of phantom arbitrage on
+        thin markets -- so it's surfaced here rather than discarded.
+        """
+        # Exact symbol match only. The old substring match (`target in k or
+        # k in target`) would serve a USDT/USDC book for a USD request and vice
+        # versa -- "btcusd" is a substring of "btcusdt" -- feeding the wrong
+        # price into a convert edge and fabricating arbitrage. Stored keys and
+        # `target` are both normalized, so equality is the correct test.
         target = self._normalize_symbol(pair_name)
-        key = next((k for k in self.order_books if target in k or k in target), None)
-        if key:
-            standardized = self._standardize_order_book(self.order_books[key])
-            if standardized is None:
-                if self.debug:
-                    print(f"[{self.broker_name}] unsupported payload for key={key}: {self.order_books[key]}")
-                return "N/A", "N/A"
-            bids = standardized.get("bids", [])
-            asks = standardized.get("asks", [])
-            return (bids[0][0] if bids else "N/A"), (asks[0][0] if asks else "N/A")
-        return "N/A", "N/A"
+        if target not in self.order_books:
+            return "N/A", "N/A", "N/A", "N/A"
+        # Drop quotes that haven't refreshed within max_quote_age: a stale book
+        # crossed against a fresher venue is the main source of phantom arbitrage.
+        if self.max_quote_age is not None:
+            age = time.time() - self.order_book_ts.get(target, 0.0)
+            if age > self.max_quote_age:
+                return "N/A", "N/A", "N/A", "N/A"
+        standardized = self._standardize_order_book(self.order_books[target])
+        if standardized is None:
+            if self.debug:
+                print(f"[{self.broker_name}] unsupported payload for key={target}: {self.order_books[target]}")
+            return "N/A", "N/A", "N/A", "N/A"
+        bids = standardized.get("bids", [])
+        asks = standardized.get("asks", [])
+        bid, bid_size = (bids[0][0], bids[0][1]) if bids else ("N/A", "N/A")
+        ask, ask_size = (asks[0][0], asks[0][1]) if asks else ("N/A", "N/A")
+        return bid, bid_size, ask, ask_size
+
+    def get_best_prices(self, pair_name):
+        bid, _bid_size, ask, _ask_size = self.get_top_of_book(pair_name)
+        return bid, ask
+
+    def get_quote_ts(self, pair_name) -> Optional[float]:
+        """
+        Wall-clock time the book for pair_name last updated, or None if there's
+        no (sufficiently fresh) quote.
+
+        Mirrors get_best_prices' exact-match + max_quote_age rule so a quote that
+        reads N/A there reports no timestamp here. Used by the feed to stamp each
+        snapshot quote, which the graph's contemporaneity guard relies on.
+        """
+        target = self._normalize_symbol(pair_name)
+        if target not in self.order_books:
+            return None
+        ts = self.order_book_ts.get(target, 0.0)
+        if self.max_quote_age is not None and (time.time() - ts) > self.max_quote_age:
+            return None
+        return ts
 
     def run(self):
         threading.Thread(target=self._start_async_loop, daemon=True).start()

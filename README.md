@@ -92,6 +92,8 @@ Nodes are `(asset, venue)` pairs, not just assets — `BTC@Binance` and `BTC@Coi
 ### Layer 1 — Data Preprocessing
 Order books from every connected venue are merged into one unified state keyed by `(asset, venue)`. Intra-venue and inter-venue edges are constructed each tick and log-transformed into weight matrix `W`, turning the multiplicative arbitrage problem into an additive one: a profitable loop becomes a negative-weight cycle. ![alt text](image.png)
 
+Furthermore, this stage also help showing how normal arbitrage loop without the further layers can be like. The implementation of L2 -> L4 is mainly for pushing the graph finding quicker and more efficient and also to conclude different aspects of the market such as L2 can shows the "market health", if spectral sum goes up, then its healthy and vice versa. Appearantly, we want it to go down, then when it goes down, there is more volatility then the arbitrage occurs better
+
 ### Layer 2 — Market Structure Analysis
 Three structural signals come from the Graph Laplacian `L = D - A`. The spectral gap `λ₂` (second-smallest Laplacian eigenvalue) measures how well-connected the market is right now — high means mispricing propagates and closes quickly, low means the graph is fragmented and deviations may persist. The tropical eigenvalue gives a hard upper bound on the best possible arbitrage rate, letting detection be skipped entirely when no profitable cycle can exist. Strain measures how far the observed graph deviates from the no-arbitrage equilibrium where every cycle's product equals 1.
 

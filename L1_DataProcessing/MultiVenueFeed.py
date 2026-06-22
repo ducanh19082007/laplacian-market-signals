@@ -17,6 +17,9 @@ except ImportError:
 
 # NOTE: Binance and Coinbase Advanced Trade use real WebSocket depth/book streams.
 # Kraken uses the v2 WebSocket API (wss://ws.kraken.com/v2).
+# OKX uses the v5 public WebSocket (wss://ws.okx.com:8443/ws/v5/public, books5 channel).
+# Gemini uses the v2 marketdata WebSocket (wss://api.gemini.com/v2/marketdata, l2 channel).
+# Bitstamp uses the v2 WebSocket (wss://ws.bitstamp.net, full order_book channel).
 #
 #
 # Author: Anh Duc Le
@@ -39,12 +42,25 @@ class MultiBrokerOrderBook:
         refresh_interval: float = 0.5,
         assets: Optional[List[str]] = None,
         transfer_cost: float = 0.0,
+        fee: float = 0.0,
+        max_quote_age: Optional[float] = None,
+        quote_window: Optional[float] = None,
+        min_notional: Optional[Dict[str, float]] = None,
     ):
         self.dashboards = []
         self.refresh_interval = refresh_interval
         # assets enables the live graph view; without it run_live() just shows the table.
         self.assets = [a.lower() for a in assets] if assets else None
         self.transfer_cost = transfer_cost
+        # Per-convert taker fee fed into the arbitrage graph (e.g. 0.001 == 0.1%).
+        self.fee = fee
+        # Max spread (seconds) between the quotes that form a cycle; passed to the
+        # graph's contemporaneity guard. None disables it. See ExchangeRateGraph.
+        self.quote_window = quote_window
+        # Minimum tradeable top-of-book notional, keyed by quote currency (e.g.
+        # {"usd": 50, "btc": 0.0005}). Edges whose best quote is good for less than
+        # this are dropped, which kills phantom arbitrage off thin/mispriced books.
+        self.min_notional = min_notional
 
         for broker in brokers:
             dashboard = OrderBookDashboard(
@@ -56,6 +72,7 @@ class MultiBrokerOrderBook:
                 payload_extractor=broker.payload_extractor,
                 initial_message=broker.initial_message,
                 debug=broker.debug,
+                max_quote_age=max_quote_age,
             )
             dashboard.run()
             self.dashboards.append((broker, dashboard))
@@ -71,8 +88,18 @@ class MultiBrokerOrderBook:
         for pair in self.get_all_pairs():
             snapshot[pair] = {}
             for broker, dashboard in self.dashboards:
-                bid, ask = dashboard.get_best_prices(pair)
-                snapshot[pair][broker.name] = {"bid": bid, "ask": ask}
+                bid, bid_size, ask, ask_size = dashboard.get_top_of_book(pair)
+                # ts lets the graph reject cycles built from non-contemporaneous
+                # quotes; None when the quote is missing or stale. bid_size/ask_size
+                # let the graph drop edges whose top-of-book is too thin to trade.
+                ts = dashboard.get_quote_ts(pair)
+                snapshot[pair][broker.name] = {
+                    "bid": bid,
+                    "ask": ask,
+                    "bid_size": bid_size,
+                    "ask_size": ask_size,
+                    "ts": ts,
+                }
         return snapshot
 
     def aggregate_best_prices(self, pair_name: str) -> Dict[str, str]:
@@ -123,7 +150,13 @@ class MultiBrokerOrderBook:
         """Reshape the current snapshot into a log-weighted exchange-rate graph."""
         if not self.assets:
             return None
-        graph = ExchangeRateGraph(self.assets, transfer_cost=self.transfer_cost)
+        graph = ExchangeRateGraph(
+            self.assets,
+            transfer_cost=self.transfer_cost,
+            fee=self.fee,
+            quote_window=self.quote_window,
+            min_notional=self.min_notional,
+        )
         graph.build_from_snapshot(self.snapshot())
         graph.log_transform()
         return graph
@@ -163,15 +196,26 @@ class MultiBrokerOrderBook:
                 dashboard.is_running = False
             print("\nMulti-broker monitoring stopped.")
 
-    def _exchange_rate_box(self) -> List[str]:
+    def _exchange_rate_box(self, max_rows: int = 20) -> List[str]:
         """
         Render the current best exchange rate per pair as a bordered box
         (list of equal-width lines), refreshed from the live snapshot.
+
+        max_rows caps how many live pairs are shown so the box never outgrows the
+        terminal; any overflow is summarized as a "(+N more)" footer line.
         """
         rows = []
         for pair in self.get_all_pairs():
             agg = self.aggregate_best_prices(pair)
-            rows.append((pair.upper(), str(agg["best_bid"]), str(agg["best_ask"])))
+            best_bid, best_ask = str(agg["best_bid"]), str(agg["best_ask"])
+            # Drop pairs with no live quote on either side -- they only waste rows.
+            if best_bid == "N/A" and best_ask == "N/A":
+                continue
+            rows.append((pair.upper(), best_bid, best_ask))
+
+        hidden = max(0, len(rows) - max_rows)
+        rows = rows[:max_rows]
+        more = f"... (+{hidden} more)" if hidden else ""
 
         pair_w = max([len(r[0]) for r in rows] + [len("PAIR")])
         bid_w = max([len(r[1]) for r in rows] + [len("BEST BID")])
@@ -179,7 +223,7 @@ class MultiBrokerOrderBook:
 
         title = f"LIVE EXCHANGE RATES  {time.strftime('%H:%M:%S')}"
         header = f"{'PAIR'.ljust(pair_w)}  {'BEST BID'.ljust(bid_w)}  {'BEST ASK'.ljust(ask_w)}"
-        inner_w = max(len(title), len(header))
+        inner_w = max(len(title), len(header), len(more))
 
         lines = ["┌─" + "─" * inner_w + "─┐",
                  "│ " + title.ljust(inner_w) + " │",
@@ -188,6 +232,8 @@ class MultiBrokerOrderBook:
         for pair, bid, ask in rows:
             body = f"{pair.ljust(pair_w)}  {bid.ljust(bid_w)}  {ask.ljust(ask_w)}"
             lines.append("│ " + body.ljust(inner_w) + " │")
+        if more:
+            lines.append("│ " + more.ljust(inner_w) + " │")
         lines.append("└─" + "─" * inner_w + "─┘")
         return lines
 
@@ -207,11 +253,29 @@ class MultiBrokerOrderBook:
             out.append(l + " " * gap + r)
         return "\n".join(out)
 
+    @staticmethod
+    def _cycle_signature(cycle: list) -> tuple:
+        """
+        Rotation-invariant key for a cycle so the same loop isn't logged twice.
+
+        Bellman-Ford may return the same arbitrage loop starting from a different
+        node on different ticks (e.g. SOL@Kraken->... vs BTC@Binance->...). Those
+        are the SAME opportunity, so we drop the duplicated closing node and rotate
+        the edge sequence to start at its smallest node before comparing.
+        """
+        ring = cycle[:-1] if len(cycle) > 1 and cycle[0] == cycle[-1] else cycle
+        if not ring:
+            return tuple(cycle)
+        start = ring.index(min(ring))
+        return tuple(ring[start:] + ring[:start])
+
     def stream_arbitrage(
         self,
         only_on_change: bool = True,
         show_box: bool = True,
         history: int = 20,
+        min_profit: float = 0.0,
+        box_rows: int = 20,
     ) -> None:
         """
         Continuous arbitrage feed.
@@ -226,6 +290,10 @@ class MultiBrokerOrderBook:
         so the list grows only on genuinely new opportunities. The detections
         deque keeps a sliding window of the last `history` lines (oldest rolls
         off as new ones arrive).
+
+        min_profit filters out cycles whose return doesn't clear this fractional
+        threshold (e.g. 0.0005 == only show >0.05% net). Combined with the graph's
+        fee model this suppresses sub-cost phantom arbitrage.
         """
         if not self.assets:
             print("stream_arbitrage needs `assets` set on the order book.")
@@ -240,9 +308,12 @@ class MultiBrokerOrderBook:
                 if graph is not None:
                     cycle = graph.find_arbitrage()
                     if cycle:
-                        signature = tuple(cycle)
-                        if not only_on_change or signature != last_signature:
-                            ret = graph.cycle_return(cycle)
+                        ret = graph.cycle_return(cycle)
+                        signature = self._cycle_signature(cycle)
+                        # Only a genuinely profitable, not-yet-seen cycle gets logged.
+                        if (ret - 1.0) > min_profit and (
+                            not only_on_change or signature != last_signature
+                        ):
                             path = " -> ".join(ExchangeRateGraph.fmt(n) for n in cycle)
                             new_line = (
                                 f"[{time.strftime('%H:%M:%S')}] "
@@ -260,7 +331,7 @@ class MultiBrokerOrderBook:
                 if show_box:
                     right = ["ARBITRAGE DETECTIONS", "-" * 20]
                     right += list(log) if log else ["(none yet)"]
-                    print(self._render_side_by_side(self._exchange_rate_box(), right))
+                    print(self._render_side_by_side(self._exchange_rate_box(box_rows), right))
                 else:
                     print(f"--- Live Arbitrage Stream (refresh {self.refresh_interval}s, Ctrl-C to stop) ---")
                     for line in (log or ["(none yet)"]):
@@ -357,6 +428,10 @@ class URL_methods:
             if not events:
                 return None
 
+            # A single l2_data message can carry events for several products.
+            # Process *all* of them so no incremental diff is dropped, then return
+            # the last-updated product's book (the pipeline stores one book per call).
+            last_key = None
             for event in events:
                 event_type = event.get("type")          # "snapshot" or "update"
                 product_id = event.get("product_id", "")
@@ -403,14 +478,17 @@ class URL_methods:
                             else:
                                 books[key]["asks"][price] = qty
 
-                book = books.get(key)
+                if key in books:
+                    last_key = key
+
+            if last_key is not None:
+                book = books.get(last_key)
                 if book:
                     # Return as list-of-tuples; _normalize_quote handles (price, qty) tuples
-                    return key, {
+                    return last_key, {
                         "bids": list(book["bids"].items()),
                         "asks": list(book["asks"].items()),
                     }
-
             return None
 
         return extractor
@@ -537,34 +615,356 @@ class URL_methods:
 
         return extractor
 
+    # -------------------------------------------------------------------------
+    # OKX  (v5 public WebSocket — wss://ws.okx.com:8443/ws/v5/public)
+    # -------------------------------------------------------------------------
+
+    @staticmethod
+    def binance_to_okx_pair(pair: str, assets: List[str]) -> str:
+        """Convert 'ethbtc' → 'ETH-BTC'. OKX uses dash-separated, uppercase codes."""
+        pair = pair.upper()
+        assets = [a.upper() for a in assets]
+        for quote in assets:
+            if pair.endswith(quote):
+                base = pair[: -len(quote)]
+                if base:
+                    return f"{base}-{quote}"
+        return pair
+
+    @staticmethod
+    def make_okx_subscription_message(pairs: List[str], assets: List[str]) -> dict:
+        """
+        Build an OKX v5 subscription for the books5 channel.
+
+        OKX v5 shape:
+        {"op": "subscribe",
+         "args": [{"channel": "books5", "instId": "BTC-USDT"}, ...]}
+
+        books5 pushes the full top-5 of the book on every update (no incremental
+        diffs), so the extractor can be stateless.
+        """
+        formatted = [URL_methods.binance_to_okx_pair(p, assets) for p in pairs]
+        return {
+            "op": "subscribe",
+            "args": [{"channel": "books5", "instId": p} for p in formatted if "-" in p],
+        }
+
+    @staticmethod
+    def make_okx_payload_extractor():
+        """
+        Stateless extractor for the OKX v5 books5 channel.
+
+        Unlike Coinbase/Kraken (snapshot + diffs), books5 sends a complete top-5
+        snapshot in every message, so there is no book state to accumulate.
+
+        Message shape:
+        {
+          "arg":  {"channel": "books5", "instId": "BTC-USDT"},
+          "data": [{"asks": [["price","size","0","numOrders"], ...],
+                    "bids": [["price","size","0","numOrders"], ...],
+                    "ts": "...", "seqId": ...}]
+        }
+
+        Each level is a list whose first two entries are price and size, which
+        _normalize_quote reads directly as (price, qty).
+        """
+        def extractor(data: Any) -> Optional[tuple]:
+            if not isinstance(data, dict):
+                return None
+            # Ignore subscribe acks, errors, and pong frames (no "arg"/"data").
+            arg = data.get("arg", {})
+            if arg.get("channel") != "books5":
+                return None
+            inst = arg.get("instId", "")
+            rows = data.get("data", [])
+            if not inst or not rows:
+                return None
+
+            entry = rows[0]
+            key = inst.replace("-", "").lower()   # "BTC-USDT" → "btcusdt"
+            return key, {
+                "bids": [(lvl[0], lvl[1]) for lvl in entry.get("bids", []) if len(lvl) >= 2],
+                "asks": [(lvl[0], lvl[1]) for lvl in entry.get("asks", []) if len(lvl) >= 2],
+            }
+
+        return extractor
+
+    # -------------------------------------------------------------------------
+    # Gemini  (v2 marketdata WebSocket — wss://api.gemini.com/v2/marketdata)
+    # -------------------------------------------------------------------------
+
+    @staticmethod
+    def binance_to_gemini_pair(pair: str, assets: List[str]) -> str:
+        """
+        Convert 'ethbtc' → 'ETHBTC'.
+
+        Gemini uses uppercase, concatenated symbols (no separator), which is just
+        the Binance lowercase symbol upper-cased. The `assets` arg is unused but
+        kept for a uniform converter signature across venues.
+        """
+        return pair.upper()
+
+    @staticmethod
+    def make_gemini_subscription_message(pairs: List[str], assets: List[str]) -> dict:
+        """
+        Build a Gemini v2 marketdata subscription for the level-2 (l2) channel.
+
+        Gemini v2 shape (one frame carries every symbol):
+        {"type": "subscribe",
+         "subscriptions": [{"name": "l2", "symbols": ["BTCUSD", "ETHBTC", ...]}]}
+
+        IMPORTANT: Gemini errors out (and can drop the connection) on an unknown
+        symbol, so callers must pass only symbols Gemini actually lists -- unlike
+        Kraken/OKX/Bitstamp which silently ignore unknown channels. The __main__
+        block filters to a curated `gemini_pairs` set for exactly this reason.
+        """
+        symbols = [URL_methods.binance_to_gemini_pair(p, assets) for p in pairs]
+        return {
+            "type": "subscribe",
+            "subscriptions": [{"name": "l2", "symbols": symbols}],
+        }
+
+    @staticmethod
+    def make_gemini_payload_extractor():
+        """
+        Return a *stateful* closure for the Gemini v2 l2 channel.
+
+        Gemini l2_updates message shape:
+        {
+          "type": "l2_updates",
+          "symbol": "BTCUSD",
+          "changes": [["buy"|"sell", "<price>", "<quantity>"], ...]
+        }
+
+        The first l2_updates per symbol is the full snapshot (every level in
+        `changes`); subsequent ones are incremental. There is no explicit
+        snapshot/update flag, so we just accumulate: a "0" quantity removes the
+        level, anything else sets it. (On reconnect Gemini resends a fresh
+        snapshot which merges on top of the retained book.)
+        """
+        books: Dict[str, Dict[str, Dict[str, str]]] = {}
+
+        def extractor(data: Any) -> Optional[tuple]:
+            if not isinstance(data, dict):
+                return None
+            if data.get("type") != "l2_updates":
+                return None
+            symbol = data.get("symbol", "")
+            if not symbol:
+                return None
+
+            key = symbol.lower()                       # "BTCUSD" → "btcusd"
+            book = books.setdefault(key, {"bids": {}, "asks": {}})
+
+            for change in data.get("changes", []):
+                if len(change) < 3:
+                    continue
+                side, price, qty = change[0], change[1], change[2]
+                bucket = (
+                    book["bids"] if side == "buy"
+                    else book["asks"] if side == "sell"
+                    else None
+                )
+                if bucket is None:
+                    continue
+                try:
+                    qty_f = float(qty)
+                except (ValueError, TypeError):
+                    continue
+                if qty_f == 0:
+                    bucket.pop(price, None)
+                else:
+                    bucket[price] = qty
+
+            return key, {
+                "bids": list(book["bids"].items()),
+                "asks": list(book["asks"].items()),
+            }
+
+        return extractor
+
+    # -------------------------------------------------------------------------
+    # Bitstamp  (WebSocket v2 — wss://ws.bitstamp.net, full order_book channel)
+    # -------------------------------------------------------------------------
+
+    @staticmethod
+    def binance_to_bitstamp_pair(pair: str, assets: List[str]) -> str:
+        """
+        Convert 'ethbtc' → 'ethbtc'.
+
+        Bitstamp uses lowercase, concatenated symbols, which is exactly the
+        Binance symbol format -- so this is an identity map kept for signature
+        uniformity with the other converters.
+        """
+        return pair.lower()
+
+    @staticmethod
+    def make_bitstamp_subscription_messages(pairs: List[str], assets: List[str]) -> list:
+        """
+        Build Bitstamp subscription frames for the full `order_book` channel.
+
+        Bitstamp wants ONE subscribe frame per channel (it has no batch form),
+        so this returns a *list* of messages -- IngestionPipeline sends each in
+        turn. Subscribing to a non-existent market yields a harmless bts:error
+        event; the connection stays up (unlike Gemini).
+
+        Per-frame shape:
+        {"event": "bts:subscribe", "data": {"channel": "order_book_btcusd"}}
+
+        The `order_book` channel pushes the full top-100 book on every event, so
+        the extractor can stay stateless.
+        """
+        return [
+            {
+                "event": "bts:subscribe",
+                "data": {"channel": f"order_book_{URL_methods.binance_to_bitstamp_pair(p, assets)}"},
+            }
+            for p in pairs
+        ]
+
+    @staticmethod
+    def make_bitstamp_payload_extractor():
+        """
+        Stateless extractor for the Bitstamp full `order_book` channel.
+
+        Bitstamp data message shape:
+        {
+          "event": "data",
+          "channel": "order_book_btcusd",
+          "data": {"timestamp": "...", "microtimestamp": "...",
+                   "bids": [["<price>", "<amount>"], ...],
+                   "asks": [["<price>", "<amount>"], ...]}
+        }
+
+        Every message carries the complete top-100 book, so there is no state to
+        accumulate (same idea as OKX books5).
+        """
+        prefix = "order_book_"
+
+        def extractor(data: Any) -> Optional[tuple]:
+            if not isinstance(data, dict):
+                return None
+            # Ignore subscription acks, errors, heartbeats, reconnect requests.
+            if data.get("event") != "data":
+                return None
+            channel = data.get("channel", "")
+            if not channel.startswith(prefix):
+                return None
+
+            key = channel[len(prefix):]                # "order_book_btcusd" → "btcusd"
+            book = data.get("data", {})
+            bids = book.get("bids", [])
+            asks = book.get("asks", [])
+            if not bids and not asks:
+                return None
+
+            return key, {
+                "bids": [(lvl[0], lvl[1]) for lvl in bids if len(lvl) >= 2],
+                "asks": [(lvl[0], lvl[1]) for lvl in asks if len(lvl) >= 2],
+            }
+
+        return extractor
+
 
 if __name__ == "__main__":
-    quote_priority = ["btc", "eth", "xrp", "sol"]
-    assets         = ["btc", "eth", "xrp", "sol"]
+    # Larger universe of liquid, cross-listed assets so the L1->L4 graph has enough
+    # nodes/edges to be worth running -- but still only names with deep books on all
+    # three venues, so quotes stay fresh inside max_quote_age instead of going N/A.
+    # Add/remove here to scale the graph; thin alts (shib/near/apt/fil) are left out
+    # because their cross-pairs are sparse and rarely tick in time.
+    #
+    # QUOTE_ASSETS are the currencies everything else is priced against. quote_priority
+    # lists them first so make_pair puts them on the QUOTE side, yielding real market
+    # tickers (btcusdt, ethbtc, solusdc, adabtc, ...) instead of inverted strings.
+    QUOTE_ASSETS = ["usdt", "usdc", "btc", "eth", "usd", "eur", "gbp", "eth"]
+    ALTS = [
+    "sol", "xrp", "ada", "doge", "link",
+    "ltc", "dot", "avax", "bch", "atom",
+    "arb", "bnb", "sui", "apt", "op",
+    "pol", "near", "fet", "rndr",
+    "pepe", "shib",
+
+    # Additions
+    "uni",
+    "aave",
+    "fil",
+    "algo",
+    "inj",
+    "etc",
+    "xlm",
+    "trx",
+    "hbar",
+    "cro",
+    "vet",
+    "icp",
+    "ena",
+    "sei",
+    "tao"
+]
+    quote_priority = QUOTE_ASSETS + ALTS
+    assets = QUOTE_ASSETS + ALTS
+
 
     def make_pair(a: str, b: str) -> str:
         base, quote = (b, a) if quote_priority.index(a) < quote_priority.index(b) else (a, b)
         return f"{base}{quote}"
 
+    def quote_side(pair: str) -> Optional[str]:
+        """The quote currency a pair ends in, or None if it's an alt-vs-alt pair."""
+        return next((q for q in QUOTE_ASSETS if pair.endswith(q)), None)
+
     # SOL/XRP has no native order book on any of the three brokers — drop it entirely.
-    # All other cross-pairs (xrpbtc, xrpeth, soleth, ethbtc, solbtc) exist on at least
-    # Binance + Kraken, so they still produce a useful BEST BID / BEST ASK.
     GLOBALLY_UNSUPPORTED = {"solxrp", "xrpsol"}
 
-    my_pairs = [
-        make_pair(a, b)
+    # Only keep pairs that real venues actually list: every asset trades against a
+    # stablecoin / BTC / ETH, but alt-vs-alt (e.g. adadoge, linkavax) mostly doesn't
+    # exist anywhere -- generating it would just spam dead subscriptions and N/A rows.
+    my_pairs = sorted({
+        p
         for a, b in combinations(assets, 2)
-        if make_pair(a, b) not in GLOBALLY_UNSUPPORTED
-    ]
+        for p in [make_pair(a, b)]
+        if quote_side(p) is not None and p not in GLOBALLY_UNSUPPORTED
+    })
 
-    # Coinbase Advanced Trade quotes XRP only against USD/USDC — no XRP-BTC or XRP-ETH.
-    # Subscribing to them causes server-side rejections and wastes a channel slot.
-    # We still keep them in my_pairs so the table rows appear (showing N/A under Coinbase,
-    # which is correct), and BEST BID/ASK aggregates from Binance + Kraken for those rows.
-    COINBASE_UNSUPPORTED = {"xrpbtc", "xrpeth"}
-    coinbase_pairs = [p for p in my_pairs if p not in COINBASE_UNSUPPORTED]
-    #when put into a graph, we doesnt need it to be a complete graph of K4 now, the edges now are enough
-    
+    # Coinbase Advanced Trade's depth is in its stablecoin (USD/USDC/USDT) markets;
+    # its crypto-crypto coverage (alt-BTC, alt-ETH) is sparse and subscribing to a
+    # product it doesn't list triggers server-side rejections. So feed Coinbase only
+    # the stablecoin-quoted pairs. Binance + Kraken still carry the BTC/ETH cross-pairs
+    # (where the triangular cycles live), and those rows just show N/A under Coinbase.
+    coinbase_pairs = [p for p in my_pairs if quote_side(p) in ("usdt", "usdc")]
+
+    # Gemini drops the whole connection on an unknown symbol, so we can ONLY
+    # subscribe to symbols it actually lists. Restrict to a curated set of liquid
+    # Gemini spot markets, intersected with whatever the universe generated.
+    GEMINI_LISTED = {
+    "btcusd", "ethusd", "ethbtc",
+    "solusd", "ltcusd", "bchusd", "linkusd",
+    "dogeusd", "xrpusd", "avaxusd", "dotusd",
+    "atomusd", "btcusdt", "ethusdt",
+
+    # Additional major assets
+    "adausd",
+    "maticusd",      # POL/MATIC
+    "uniusd",
+    "aaveusd",
+    "filusd",
+    "algousd",
+    "compusd",
+    "manausd",
+    "sandusd",
+    "injusd",
+    "pepeusd",
+    "shibusd",
+    "nearusd",
+    "aptusd",
+    "suiusd",
+}
+    gemini_pairs = [p for p in my_pairs if p in GEMINI_LISTED]
+
+    # Bitstamp ignores unknown channels (harmless bts:error), so we can be more
+    # liberal -- just skip the gbp-quoted pairs it rarely lists.
+    bitstamp_pairs = [p for p in my_pairs if quote_side(p) in ("usd", "usdt", "usdc", "eur", "btc", "eth")]
+
 
     binance = BrokerConfig(
         name="Binance",
@@ -591,22 +991,65 @@ if __name__ == "__main__":
         debug=False,
     )
 
-    broker_configs = [binance, coinbase, kraken]
+    okx = BrokerConfig(
+        name="OKX",
+        stream_url="wss://ws.okx.com:8443/ws/v5/public",    # OKX v5 public WebSocket
+        pairs=my_pairs,
+        payload_extractor=URL_methods.make_okx_payload_extractor(),        # stateless (books5)
+        initial_message=URL_methods.make_okx_subscription_message(my_pairs, assets),
+        debug=False,
+    )
+
+    gemini = BrokerConfig(
+        name="Gemini",
+        stream_url="wss://api.gemini.com/v2/marketdata",   # Gemini v2 marketdata
+        pairs=my_pairs,
+        payload_extractor=URL_methods.make_gemini_payload_extractor(),     # stateful (l2)
+        initial_message=URL_methods.make_gemini_subscription_message(gemini_pairs, assets),
+        debug=False,
+    )
+
+    bitstamp = BrokerConfig(
+        name="Bitstamp",
+        stream_url="wss://ws.bitstamp.net",                 # Bitstamp WebSocket v2
+        pairs=my_pairs,
+        payload_extractor=URL_methods.make_bitstamp_payload_extractor(),   # stateless (full book)
+        initial_message=URL_methods.make_bitstamp_subscription_messages(bitstamp_pairs, assets),
+        debug=False,
+    )
+
+    broker_configs = [binance, coinbase, kraken, okx, gemini, bitstamp]
 
     coinbase_sub = URL_methods.make_coinbase_subscription_message(my_pairs, assets)
     kraken_sub   = URL_methods.make_kraken_subscription_message(my_pairs, assets)
     print(f"Coinbase subscription:\n{json.dumps(coinbase_sub, indent=2)}\n")
     print(f"Kraken subscription:\n{json.dumps(kraken_sub, indent=2)}\n")
 
+    # Minimum tradeable top-of-book notional per quote currency. An edge survives
+    # only if its best quote is good for at least this much -- so a thin/mispriced
+    # top-of-book on an illiquid alt (e.g. the persistent RNDR@Bitstamp triangle)
+    # no longer counts as infinitely deep and stops fabricating ~1-2% phantom arb.
+    # Stable/fiat thresholds are ~$50; BTC/ETH are the rough $50 equivalent.
+    MIN_NOTIONAL = {
+        "usd": 50.0, "usdt": 50.0, "usdc": 50.0, "eur": 50.0, "gbp": 50.0,
+        "btc": 0.0005, "eth": 0.02,
+    }
+
     multi_broker = MultiBrokerOrderBook(
         broker_configs,
-        refresh_interval=0.05,
+        refresh_interval=0.01,
         assets=assets,          # enables the live (asset x venue) graph + arbitrage view
+        fee=0.0001,             # 0.20% taker fee per convert leg -- kills sub-fee phantom arb from Kraken
+        max_quote_age=1.0,      # absolute backstop: ignore any quote not refreshed in the last 1s
+        quote_window=0.2,       # legs of a cycle must be within 0.5s of each other (kills stale-leg phantoms)
+        min_notional=MIN_NOTIONAL,  # drop edges whose top-of-book is too thin to trade
     )
 
     # Live exchange-rate box on the left + arbitrage detections on the right.
     # Set show_box=False for a plain scrolling arbitrage log instead.
-    multi_broker.stream_arbitrage(only_on_change=True, show_box=True)
+    # min_profit=0.0 shows every net-positive cycle after fees; raise it (e.g.
+    # 0.0005) to only surface opportunities clearing an extra 0.05%.
+    multi_broker.stream_arbitrage(only_on_change=True, show_box=True, min_profit=0.0)
 
     # Snapshot order-book table instead (clears the screen each tick):
     # multi_broker.run_live()

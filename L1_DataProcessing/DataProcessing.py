@@ -60,11 +60,35 @@ class ExchangeRateGraph:
     }
     """
 
-    def __init__(self, assets: List[str], transfer_cost: float = 0.0):
+    def __init__(
+        self,
+        assets: List[str],
+        transfer_cost: float = 0.0,
+        fee: float = 0.0,
+        quote_window: Optional[float] = None,
+        min_notional: Optional[Dict[str, float]] = None,
+    ):
         self.assets = [a.lower() for a in assets]
         # transfer_cost is the fractional cost of moving one asset between venues;
         # 0.0 => a perfect 1:1 transfer. e.g. 0.001 == 10 bps.
         self.transfer_cost = transfer_cost
+        # fee is the fractional taker fee charged on each convert leg (e.g. 0.001
+        # == 0.1%). Without it the graph is frictionless and reports sub-fee
+        # "arbitrage" that no real trade could ever capture.
+        self.fee = fee
+        # quote_window (seconds) bounds how far apart, in time, the quotes that
+        # build a cycle may be. None disables the guard; see build_from_snapshot.
+        self.quote_window = quote_window
+        # Minimum tradeable top-of-book notional per QUOTE currency, e.g.
+        # {"usd": 50, "eur": 50, "btc": 0.0005}. A convert edge is only added if the
+        # best quote on that side is good for at least this much (price * size, in
+        # the quote currency). This is the guard against phantom arbitrage: a thin or
+        # mispriced top-of-book on an illiquid market (the classic single-venue
+        # triangle that "profits" by ~1-2% every tick) is good for a trivial amount,
+        # so dropping it removes the loop. Missing/zero threshold => no filter for
+        # that quote currency; missing size on a quote under an active threshold is
+        # treated as untradeable. None disables the filter entirely.
+        self.min_notional = {k.lower(): v for k, v in (min_notional or {}).items()}
         self.adjacency: Dict[Node, Dict[Node, dict]] = {}
 
     # ------------------------------------------------------------------ build
@@ -88,6 +112,23 @@ class ExchangeRateGraph:
         self.adjacency = {}
         brokers_per_asset: Dict[str, set] = {}
 
+        # Contemporaneity guard. A triangular cycle assembled from quotes taken
+        # seconds apart is the classic phantom: one leg drifts while the others
+        # are stale, so the loop "profits" by exactly that drift (the tell is a
+        # single-venue cycle whose % wanders tick to tick). We find the freshest
+        # quote in the snapshot and drop any quote lagging it by more than
+        # quote_window seconds, so every surviving edge -- and therefore every
+        # cycle -- is near-contemporaneous. None disables the guard.
+        newest_ts = None
+        if self.quote_window is not None:
+            all_ts = [
+                q["ts"]
+                for by_broker in snapshot.values()
+                for q in by_broker.values()
+                if isinstance(q, dict) and q.get("ts") is not None
+            ]
+            newest_ts = max(all_ts) if all_ts else None
+
         for pair, by_broker in snapshot.items():
             split = split_pair(pair, self.assets)
             if split is None:
@@ -98,16 +139,48 @@ class ExchangeRateGraph:
                 bid = _to_float(quote_dict.get("bid"))
                 ask = _to_float(quote_dict.get("ask"))
 
+                # Drop quotes lagging the freshest one by more than the window;
+                # a missing timestamp under an active guard counts as stale.
+                if newest_ts is not None:
+                    ts = quote_dict.get("ts")
+                    if ts is None or (newest_ts - ts) > self.quote_window:
+                        bid = ask = None
+
+                # Reject crossed/locked books (bid >= ask). A real book always has
+                # ask > bid; bid >= ask means the two sides came from out-of-sync
+                # updates or rounded display prices. Left in, this fabricates a
+                # same-venue round-trip "arbitrage" (sell at bid, rebuy at ask),
+                # which is the phantom the detector was reporting.
+                if bid is not None and ask is not None and bid >= ask:
+                    bid = ask = None
+
+                # Depth filter: drop a side whose best quote is good for less than
+                # min_notional[quote] (price * size, in the quote currency). A thin
+                # or stale top-of-book priced 1-2% off -- common on illiquid alts --
+                # is good for a trivial amount; treated as infinitely deep it
+                # fabricates the persistent single-venue triangle. Only applies when
+                # a threshold is configured for this quote currency.
+                min_q = self.min_notional.get(quote)
+                if min_q:
+                    bid_size = _to_float(quote_dict.get("bid_size"))
+                    ask_size = _to_float(quote_dict.get("ask_size"))
+                    if bid is not None and (bid_size is None or bid * bid_size < min_q):
+                        bid = None
+                    if ask is not None and (ask_size is None or ask * ask_size < min_q):
+                        ask = None
+
                 base_node: Node = (base, broker)
                 quote_node: Node = (quote, broker)
 
+                # Each convert leg loses the taker fee, so you keep (1 - fee) of it.
+                keep = 1.0 - self.fee
                 # Sell BASE -> receive QUOTE at the bid (quote per base).
                 if bid is not None:
-                    self._add_edge(base_node, quote_node, bid,
+                    self._add_edge(base_node, quote_node, bid * keep,
                                    kind="convert", pair=pair, broker=broker)
                 # Buy BASE with QUOTE -> pay the ask, so 1/ask base per quote.
                 if ask is not None:
-                    self._add_edge(quote_node, base_node, 1.0 / ask,
+                    self._add_edge(quote_node, base_node, (1.0 / ask) * keep,
                                    kind="convert", pair=pair, broker=broker)
 
                 if bid is not None or ask is not None:
