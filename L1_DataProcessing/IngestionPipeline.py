@@ -26,6 +26,7 @@ class OrderBookDashboard:
         refresh_interval=0.1,
         show=True,
         payload_extractor: Optional[PayloadExtractor] = None,
+        initial_message: Optional[Any] = None,
         debug=False,
     ):
         self.pairs = [self._normalize_symbol(p) for p in pairs]
@@ -37,6 +38,7 @@ class OrderBookDashboard:
         self.show = show
         self.debug = debug
         self.payload_extractor = payload_extractor
+        self.initial_message = initial_message
         self.mock = isinstance(stream_url, str) and stream_url.startswith("mock:")
         self.mock_seed = stream_url.split(":", 1)[1] if self.mock else broker_name
 
@@ -99,6 +101,10 @@ class OrderBookDashboard:
                 async with websockets.connect(self.stream_url) as ws:
                     if self.debug:
                         print(f"[{self.broker_name}] connected to {self.stream_url}")
+                    if self.initial_message is not None:
+                        await ws.send(json.dumps(self.initial_message))
+                        if self.debug:
+                            print(f"[{self.broker_name}] sent initial subscription: {self.initial_message}")
                     while self.is_running:
                         try:
                             raw_data = await ws.recv()
