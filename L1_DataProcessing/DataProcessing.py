@@ -11,6 +11,10 @@ turns into a NEGATIVE-sum cycle, which Bellman-Ford can detect.
 No third-party deps -- this is just a reshaping of the snapshot dict produced by
 MultiBrokerOrderBook.snapshot() plus a math.log over the edges.
 
+Furthermore, further implementation will be made here as L2 to L4 will be implemented
+since the goal is not only to analyse the market but uses the analysis to reduce the computation
+of graph theory, which notoriously known with L4.
+
 Author: Anh Duc Le
 """
 
@@ -24,6 +28,7 @@ Node = Tuple[str, str]
 def split_pair(pair: str, assets: List[str]) -> Optional[Tuple[str, str]]:
     """
     Split a concatenated pair like 'ethbtc' into (base, quote) = ('eth', 'btc').
+    for a edge of (base, quote) in E as G = (V, E) is accounted
 
     A pair string is base+quote with no separator, so we need the known asset
     list to find where the quote starts (same trick used in MultiVenueFeed).
@@ -50,10 +55,13 @@ def _to_float(value) -> Optional[float]:
 class ExchangeRateGraph:
     """
     Directed multi-venue exchange-rate graph.
+    
+    Idea: created a adjacent matrix which each element of the matrix represents the weights of
+    that relationship between each node's weights with -log(rate ( 1 - fee)) *actually
 
     adjacency[u][v] = {
         "rate":   float,   # multiply your holding of u by this to get v
-        "weight": float,   # -log(rate), filled in by log_transform()
+        "weight": float,   # -log(rate) or -log(rate(1 - fee(%))), filled in by log_transform()
         "kind":   "convert" | "transfer",
         "pair":   str,     # source order-book pair (convert edges only)
         "broker": str,     # venue the conversion happens on (convert edges only)
@@ -68,17 +76,24 @@ class ExchangeRateGraph:
         quote_window: Optional[float] = None,
         min_notional: Optional[Dict[str, float]] = None,
     ):
-        self.assets = [a.lower() for a in assets]
+        self.assets = [a.lower() for a in assets] 
+        
         # transfer_cost is the fractional cost of moving one asset between venues;
-        # 0.0 => a perfect 1:1 transfer. e.g. 0.001 == 10 bps.
+        # 0.0 => a perfect 1:1 transfer. e.g. 0.001 == 10 bps., like BTC from Binance
+        # to BTC from Kraken need a cost to transfer.
         self.transfer_cost = transfer_cost
+        
         # fee is the fractional taker fee charged on each convert leg (e.g. 0.001
         # == 0.1%). Without it the graph is frictionless and reports sub-fee
         # "arbitrage" that no real trade could ever capture.
-        self.fee = fee
+        #technically, the weight would be Ln(Rn(1 - fee(%) ))
+        self.fee = fee 
+        
         # quote_window (seconds) bounds how far apart, in time, the quotes that
         # build a cycle may be. None disables the guard; see build_from_snapshot.
+        #same with self.max_quote_age in IngestionPipeline
         self.quote_window = quote_window
+        
         # Minimum tradeable top-of-book notional per QUOTE currency, e.g.
         # {"usd": 50, "eur": 50, "btc": 0.0005}. A convert edge is only added if the
         # best quote on that side is good for at least this much (price * size, in
@@ -88,10 +103,18 @@ class ExchangeRateGraph:
         # so dropping it removes the loop. Missing/zero threshold => no filter for
         # that quote currency; missing size on a quote under an active threshold is
         # treated as untradeable. None disables the filter entirely.
+        
+        #If this algorithm triggers a trade to capture a 5-cent profit, 
+        # but you spend $1.50 in fixed network transaction overhead to execute it, 
+        # you didn't make a profit—you just paid $1.45 for the privilege of trading.
+        #remember, other than the venues-transaction-fees and the current-transaction-fee
+        #there always a fixed fee, and the min_nominal is use to account on this.
         self.min_notional = {k.lower(): v for k, v in (min_notional or {}).items()}
-        self.adjacency: Dict[Node, Dict[Node, dict]] = {}
+        
+        self.adjacency: Dict[Node, Dict[Node, dict]] = {} #the adjacent matrix, our output
 
-    # ------------------------------------------------------------------ build
+
+
     def _add_edge(self, src: Node, dst: Node, rate: float, **attrs) -> None:
         if rate is None or rate <= 0:
             return
@@ -99,15 +122,32 @@ class ExchangeRateGraph:
         self.adjacency.setdefault(dst, {})
         self.adjacency[src][dst] = {"rate": rate, "weight": None, **attrs}
 
-    def build_from_snapshot(
-        self, snapshot: Dict[str, Dict[str, Dict[str, str]]]
-    ) -> "ExchangeRateGraph":
+    def build_from_snapshot(self, snapshot: Dict[str, Dict[str, Dict[str, str]]] ) -> "ExchangeRateGraph":
         """
         Build the graph from MultiBrokerOrderBook.snapshot():
             snapshot[pair][broker] = {"bid": ..., "ask": ...}
 
         For each broker that quotes a pair we add the two conversion directions,
         then we stitch venues together with same-asset transfer edges.
+        
+        Output on self.adjacent examples:
+        self.adjacency = {
+            ("eth", "Binance"): {
+                ("btc", "Binance"): {"rate": 0.0610,        "weight": None, "kind": "convert", "pair": "ethbtc", "broker": "Binance"},
+                ("xrp", "Binance"): {"rate": 5089.058...,   "weight": None, "kind": "convert", "pair": "xrpeth",  "broker": "Binance"},
+                ("eth", "Kraken"):  {"rate": 1.0,           "weight": None, "kind": "transfer"},
+            },
+            ("btc", "Binance"): {
+                ("eth", "Binance"): {"rate": 16.3666...,    "weight": None, "kind": "convert", "pair": "ethbtc", "broker": "Binance"},
+                ("xrp", "Binance"): {"rate": 83263.94...,   "weight": None, "kind": "convert", "pair": "xrpbtc", "broker": "Binance"},
+                ("btc", "Kraken"):  {"rate": 1.0,           "weight": None, "kind": "transfer"},
+            },
+            ("eth", "Kraken"): {
+                ("btc", "Kraken"):  {"rate": 0.0600,        "weight": None, "kind": "convert", "pair": "ethbtc", "broker": "Kraken"},
+                ("eth", "Binance"): {"rate": 1.0,           "weight": None, "kind": "transfer"},
+            },
+        }
+        this is technically a 3x3 but there is no ethKraken to ethBinance so it will be None
         """
         self.adjacency = {}
         brokers_per_asset: Dict[str, set] = {}
@@ -117,8 +157,8 @@ class ExchangeRateGraph:
         # are stale, so the loop "profits" by exactly that drift (the tell is a
         # single-venue cycle whose % wanders tick to tick). We find the freshest
         # quote in the snapshot and drop any quote lagging it by more than
-        # quote_window seconds, so every surviving edge -- and therefore every
-        # cycle -- is near-contemporaneous. None disables the guard.
+        # quote_window seconds, so every surviving edge is near-contemporaneous. 
+        # None disables the guard.
         newest_ts = None
         if self.quote_window is not None:
             all_ts = [
@@ -143,7 +183,7 @@ class ExchangeRateGraph:
                 # a missing timestamp under an active guard counts as stale.
                 if newest_ts is not None:
                     ts = quote_dict.get("ts")
-                    if ts is None or (newest_ts - ts) > self.quote_window:
+                    if ts is None or (newest_ts - ts) > self.quote_window: #this is timesheet so it is suppose to be in time
                         bid = ask = None
 
                 # Reject crossed/locked books (bid >= ask). A real book always has
@@ -201,7 +241,6 @@ class ExchangeRateGraph:
                         continue
                     self._add_edge((asset, a), (asset, b), rate, kind="transfer")
 
-    # -------------------------------------------------------------- transform
     def log_transform(self) -> "ExchangeRateGraph":
         """
         Set weight = -ln(rate) on every edge.
@@ -215,53 +254,111 @@ class ExchangeRateGraph:
                 attrs["weight"] = -math.log(attrs["rate"])
         return self
 
-    # ----------------------------------------------------------- graph theory
-    def nodes(self) -> List[Node]:
+    # --------------------------------------------------- graph theory
+    def nodes(self) -> List[Node]: #compilation of all the nodes
         return sorted(self.adjacency.keys())
 
-    def edges(self) -> List[Tuple[Node, Node, dict]]:
+    def edges(self) -> List[Tuple[Node, Node, dict]]: #compilation of all the edges
+        """
+        examples of the output:
+        [
+        # Edge 1: From ETH to BTC
+        (
+            ("eth", "Binance"),        # u (source node)
+            ("btc", "Binance"),        # v (destination node)
+            {                          # a (attributes dictionary)
+                "rate": 0.060939, 
+                "weight": 2.7978505, 
+                "kind": "convert", 
+                "pair": "ethbtc", 
+                "broker": "Binance"
+            }
+        ),
+        
+        # Edge 2: From BTC to ETH
+        (
+            ("btc", "Binance"),        # u (source node)
+            ("eth", "Binance"),        # v (destination node)
+            {                          # a (attributes dictionary)
+                "rate": 16.3502455, 
+                "weight": -2.7942426, 
+                "kind": "convert", 
+                "pair": "ethbtc", 
+                "broker": "Binance"
+            }
+        )
+    ]
+        """
         return [(u, v, a) for u, nbrs in self.adjacency.items() for v, a in nbrs.items()]
+
+    def subgraph(self, nodes) -> "ExchangeRateGraph":
+        """
+        Return a NEW graph holding only `nodes` and the edges whose BOTH endpoints
+        are in `nodes`. Non-destructive: self (the full graph) is left untouched.
+
+        This is the L3 -> L1 reduction. L3 (Tarjan SCC) hands us the node set of one
+        strongly-connected component; a profitable cycle must live ENTIRELY inside a
+        single SCC, so running find_arbitrage() on this smaller adjacency finds the
+        same cycle while relaxing far fewer edges -- turning the O(|V|*|E|) sweep over
+        the whole graph into a sum over tiny components. Edge attr dicts (incl. the
+        already-computed -ln(rate) weight) are shared by reference, so there is no
+        rebuild and no log_transform() recompute. *hasnt implemented L3 yet but this is the subgraph.
+        """
+        keep = set(nodes)
+        sub = ExchangeRateGraph(self.assets, transfer_cost=self.transfer_cost, fee=self.fee)
+        sub.adjacency = {
+            u: {v: a for v, a in nbrs.items() if v in keep}
+            for u, nbrs in self.adjacency.items()
+            if u in keep
+        }
+        return sub
 
     def find_arbitrage(self) -> Optional[List[Node]]:
         """
         Bellman-Ford over the log-weights. Returns one node cycle whose rates
         multiply to > 1 (an arbitrage loop), or None if the market is arb-free.
+        
+        If an arbitrage path exists, it returns a readable execution route like:
+        [("btc", "Binance"), ("eth", "Binance"), ("eth", "Kraken"), ("btc", "Binance")]
 
         Call log_transform() first.
+        
+        highly recommend this video: https://www.youtube.com/watch?v=B5PmlJACZ9Y  for Bellman-Ford comprehension  
         """
         if any(a["weight"] is None for _, _, a in self.edges()):
-            self.log_transform()
+            self.log_transform();
 
         nodes = self.nodes()
         if not nodes:
             return None
 
         dist = {n: 0.0 for n in nodes}          # 0 init => detects any neg cycle
-        pred: Dict[Node, Optional[Node]] = {n: None for n in nodes}
+        pred: Dict[Node, Optional[Node]] = {n: None for n in nodes} #this is like the table from that video up there
         edges = self.edges()
 
         updated = None
-        for _ in range(len(nodes)):
+        for _ in range(len(nodes)): #run O(|V| ) cycle
             updated = None
-            for u, v, a in edges:
+            for u, v, a in edges: # this, too. Hence we have O(|V|*|E|)
                 if dist[u] + a["weight"] < dist[v] - 1e-12:
                     dist[v] = dist[u] + a["weight"]
                     pred[v] = u
                     updated = v
             if updated is None:
-                return None  # converged, no negative cycle
+                return None  # converged, no negative cycle, if at some point, all the nodes sources
+            #and the edges doesnt dissimilar to the bellman-ford  inequality, then updated still remain None.
 
         # `updated` sits on or downstream of a negative cycle; walk back len(nodes)
         # steps so we're guaranteed to land ON the cycle. Every node visited here
         # has a predecessor (it was relaxed), so pred[...] is never None.
-        assert updated is not None  # loop only exits here if a relaxation happened
+        assert updated is not None  # loop only exits here if a relaxation happened, put this as a precaution
         node: Node = updated
-        for _ in range(len(nodes)):
+        for _ in range(len(nodes)): #do 1 loop one more time to check if the pred[...] is ACTUALLY never None or no
             prev = pred[node]
             assert prev is not None
             node = prev
 
-        start = node
+        start = node #as said before, the updated note will guarantee land on the neg cycle
         cycle: List[Node] = [start]
         cur = pred[start]
         while cur is not None and cur != start:
@@ -275,7 +372,7 @@ class ExchangeRateGraph:
         """Product of rates around a node cycle (>1 means profit). 0 if broken."""
         product = 1.0
         for u, v in zip(cycle, cycle[1:]):
-            edge = self.adjacency.get(u, {}).get(v)
+            edge = self.adjacency.get(u, {}).get(v) #in case the loop itself have 
             if edge is None:
                 return 0.0
             product *= edge["rate"]
@@ -301,6 +398,7 @@ class ExchangeRateGraph:
 if __name__ == "__main__":
     # Tiny static snapshot so this runs without a live feed.
     # Rates are rigged so eth->btc->eth across venues loops to a profit.
+    #this example is without ts and hence without quote_window
     assets = ["btc", "eth", "xrp", "sol"]
     snapshot = {
         "ethbtc": {
@@ -314,8 +412,21 @@ if __name__ == "__main__":
             "Binance": {"bid": "0.00019600", "ask": "0.00019650"},
         },
     }
+    
+    snapshot1 = {
+    "ethbtc": {
+        "Binance": {"bid": "0.0610", "ask": "0.0611","ts": 1000.0,},
+        "Kraken": {"bid": "0.0600", "ask": "0.0601","ts": 1000.676767,},
+    },
+    "xrpbtc": {
+        "Binance": {"bid": "0.00001200", "ask": "0.00001201", "ts": 1000.0,},
+    },
+    "xrpeth": {
+        "Binance": {"bid": "0.00019600", "ask": "0.00019650", "ts": 1000.0,},
+    },
+}
 
-    graph = ExchangeRateGraph(assets, transfer_cost=0.0).build_from_snapshot(snapshot)
+    graph = ExchangeRateGraph(assets, transfer_cost=0.0, quote_window=0.1).build_from_snapshot(snapshot)
     graph.log_transform()
     print(graph.summary())
 
@@ -325,5 +436,19 @@ if __name__ == "__main__":
         ret = graph.cycle_return(cycle)
         print(f"\nArbitrage cycle: {path}")
         print(f"Return multiple : {ret:.8f}  ({(ret - 1) * 100:+.4f}%)")
+    else:
+        print("\nNo arbitrage cycle found.")
+        
+        
+    graph1 = ExchangeRateGraph(assets, transfer_cost=0.0, quote_window=0.1).build_from_snapshot(snapshot1)
+    graph1.log_transform()
+    print(graph1.summary())
+
+    cycle1 = graph1.find_arbitrage()
+    if cycle1:
+        path1 = " -> ".join(ExchangeRateGraph.fmt(n) for n in cycle1)
+        ret1 = graph1.cycle_return(cycle1)
+        print(f"\nArbitrage cycle: {path1}")
+        print(f"Return multiple : {ret1:.8f}  ({(ret1 - 1) * 100:+.4f}%)")
     else:
         print("\nNo arbitrage cycle found.")

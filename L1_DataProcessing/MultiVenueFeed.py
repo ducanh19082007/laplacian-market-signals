@@ -6,7 +6,7 @@ from itertools import combinations
 from typing import Dict, List, Optional, Any
 import json
 
-
+#double check
 try:
     from .IngestionPipeline import OrderBookDashboard
     from .DataProcessing import ExchangeRateGraph
@@ -25,6 +25,7 @@ except ImportError:
 # Author: Anh Duc Le
 
 
+#uses this to initializes each Brokers.
 @dataclass
 class BrokerConfig:
     name: str
@@ -63,6 +64,7 @@ class MultiBrokerOrderBook:
         self.min_notional = min_notional
 
         for broker in brokers:
+            #check back at IngestionPipeline.py, that's why i run it through Threading
             dashboard = OrderBookDashboard(
                 broker.pairs,
                 broker.stream_url,
@@ -84,6 +86,7 @@ class MultiBrokerOrderBook:
         return sorted(pairs)
 
     def snapshot(self) -> Dict[str, Dict[str, Dict[str, str]]]:
+        #snapshot of the current compilation of data to sent to DataProcessing
         snapshot = {}
         for pair in self.get_all_pairs():
             snapshot[pair] = {}
@@ -191,7 +194,7 @@ class MultiBrokerOrderBook:
                 self.print_table()
                 self.print_arbitrage()
                 time.sleep(self.refresh_interval)
-        except KeyboardInterrupt:
+        except KeyboardInterrupt: #ctrl + C in Terminal
             for _, dashboard in self.dashboards:
                 dashboard.is_running = False
             print("\nMulti-broker monitoring stopped.")
@@ -278,7 +281,7 @@ class MultiBrokerOrderBook:
         box_rows: int = 20,
     ) -> None:
         """
-        Continuous arbitrage feed.
+        Continuous arbitrage feed. Aggregator of everything of Layer 1
 
         Both modes clear the screen every tick so old text never accumulates.
         show_box=False -> redraw a plain header + the last `history` detections.
@@ -294,6 +297,8 @@ class MultiBrokerOrderBook:
         min_profit filters out cycles whose return doesn't clear this fractional
         threshold (e.g. 0.0005 == only show >0.05% net). Combined with the graph's
         fee model this suppresses sub-cost phantom arbitrage.
+        
+        Further implementation of other Layers will be implemented
         """
         if not self.assets:
             print("stream_arbitrage needs `assets` set on the order book.")
@@ -343,7 +348,7 @@ class MultiBrokerOrderBook:
                 dashboard.is_running = False
             print("\nArbitrage stream stopped.")
 
-
+#only existed for 6 specific Brokers: CoinBase, Gemini, Binance, Kraken, OKX, and Bitstamp
 class URL_methods:
 
     # -------------------------------------------------------------------------
@@ -876,7 +881,7 @@ if __name__ == "__main__":
     # QUOTE_ASSETS are the currencies everything else is priced against. quote_priority
     # lists them first so make_pair puts them on the QUOTE side, yielding real market
     # tickers (btcusdt, ethbtc, solusdc, adabtc, ...) instead of inverted strings.
-    QUOTE_ASSETS = ["usdt", "usdc", "btc", "eth", "usd", "eur", "gbp", "eth"]
+    QUOTE_ASSETS = ["usdt", "usdc", "btc", "eth", "usd", "eur", "gbp"]
     ALTS = [
     "sol", "xrp", "ada", "doge", "link",
     "ltc", "dot", "avax", "bch", "atom",
@@ -941,8 +946,6 @@ if __name__ == "__main__":
     "solusd", "ltcusd", "bchusd", "linkusd",
     "dogeusd", "xrpusd", "avaxusd", "dotusd",
     "atomusd", "btcusdt", "ethusdt",
-
-    # Additional major assets
     "adausd",
     "maticusd",      # POL/MATIC
     "uniusd",
@@ -1035,6 +1038,9 @@ if __name__ == "__main__":
         "btc": 0.0005, "eth": 0.02,
     }
 
+    #for this test run, i will deliberately picked the fee, transaction fee, and nominal min to
+    #be a bit naive to see how it run. those variables also is not detailed enough
+    #given they are being generalized anyway.
     multi_broker = MultiBrokerOrderBook(
         broker_configs,
         refresh_interval=0.01,

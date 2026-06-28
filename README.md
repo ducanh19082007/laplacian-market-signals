@@ -36,7 +36,7 @@ flowchart TD
     subgraph C["2. Market Structure Analysis"]
         C1["Graph Laplacian<br/>L = D - A"]
         C2["Spectral Gap λ₂<br/>Fiedler Value"]
-        C3["Tropical Eigenvalue<br/>Upper Bound on Best Cycle"]
+        C3["Tropical Min Cycle Mean<br/>< 0 ⇒ profitable cycle exists (gate)"]
         C4["Strain<br/>Deviation from No-Arb Equilibrium"]
         C1 --> C2
         C1 --> C3
@@ -57,13 +57,14 @@ flowchart TD
         F2 --> F3
     end
 
-    D --> E
+    D -->|SCC node-sets| E
     F -->|gates: trust a cycle only if<br/>its pair is mean-reverting| E
 
-    subgraph E["4. Arbitrage Detection"]
-        E1["Bellman-Ford<br/>Negative Cycle Detection"]
+    subgraph E["4. Arbitrage Detection — L3 → L1 round trip"]
+        E0["g.subgraph(SCC)<br/>shrink the adjacency"]
+        E1["Bellman-Ford in L1 DataProcessing<br/>Negative Cycle Detection"]
         E2["Cost Filter<br/>Spread + Depth + Transfer Fees"]
-        E1 --> E2
+        E0 --> E1 --> E2
     end
 
     E --> G
@@ -95,13 +96,13 @@ Order books from every connected venue are merged into one unified state keyed b
 Furthermore, this stage also help showing how normal arbitrage loop without the further layers can be like. The implementation of L2 -> L4 is mainly for pushing the graph finding quicker and more efficient and also to conclude different aspects of the market such as L2 can shows the "market health", if spectral sum goes up, then its healthy and vice versa. Appearantly, we want it to go down, then when it goes down, there is more volatility then the arbitrage occurs better
 
 ### Layer 2 — Market Structure Analysis
-Three structural signals come from the Graph Laplacian `L = D - A`. The spectral gap `λ₂` (second-smallest Laplacian eigenvalue) measures how well-connected the market is right now — high means mispricing propagates and closes quickly, low means the graph is fragmented and deviations may persist. The tropical eigenvalue gives a hard upper bound on the best possible arbitrage rate, letting detection be skipped entirely when no profitable cycle can exist. Strain measures how far the observed graph deviates from the no-arbitrage equilibrium where every cycle's product equals 1.
+Three structural signals come from the Graph Laplacian `L = D - A`. The spectral gap `λ₂` (second-smallest Laplacian eigenvalue) measures how well-connected the market is right now — high means mispricing propagates and closes quickly, low means the graph is fragmented and deviations may persist. The tropical (min-plus) eigenvalue is the **minimum cycle mean** of the `-ln(rate)` weights: it is negative exactly when a profitable cycle exists anywhere in the graph, so it acts as a cheap go/no-go gate — when it is `≥ 0` (no profitable cycle possible) the reduction and detection are skipped entirely for that tick. Strain measures how far the observed graph deviates from the no-arbitrage equilibrium where every cycle's product equals 1. This layer is diagnosis only — it scores the whole market and gates; it does **not** shrink the graph (that is Layer 3).
 
 ### Layer 3 — Spatial Graph Analysis
-Tarjan's algorithm finds Strongly Connected Components, pruning the graph down to only the subsets where a closed trading loop is actually possible — illiquid pairs and disconnected venues drop out before Bellman-Ford ever runs. Spectral embedding projects the remaining nodes into low-dimensional space, surfacing which venues and assets cluster together.
+This is the layer that actually makes the graph smaller. Tarjan's algorithm finds Strongly Connected Components and drops the singletons — a profitable cycle must live *entirely* inside one SCC, so the subsets where no closed trading loop is possible (illiquid pairs, disconnected venues) fall out before Bellman-Ford ever runs. Spectral embedding then *ranks* the remaining SCCs by instability so the most promising one is searched first — but ranking only reorders, it never drops nodes (a spectral cut could slice through a real cycle and lose the arbitrage). Layer 3's output is the node-set of each non-trivial SCC.
 
-### Layer 4 — Arbitrage Detection
-Bellman-Ford runs only on the SCC-pruned subgraph, and only on cycles that Layer 5 confirms are sitting in a statistically mean-reverting regime — a cycle in a trending or random-walk regime might widen instead of close, so detecting a negative cycle there is not the same thing as having found real arbitrage. Surviving cycles pass a cost filter (spread, depth, transfer fees) and are written to the Feature Store with their full path and profit.
+### Arbitrage Detection — the L3 → L1 round trip (no separate layer)
+There is no standalone detection layer. Detection is the loop closing back on Layer 1: for each SCC node-set Layer 3 marks tradeable, the engine calls `ExchangeRateGraph.subgraph(scc)` to shrink the adjacency, then runs that smaller graph's own `find_arbitrage()` — the Bellman-Ford that already lives in L1's DataProcessing. This turns the `O(V·E)` sweep over the whole graph into a sum over tiny components. Detection runs only on cycles that Layer 5 confirms are in a statistically mean-reverting regime — a cycle in a trending or random-walk regime might widen instead of close, so a negative cycle there is not the same thing as real arbitrage. Surviving cycles pass a cost filter (spread, depth, transfer fees) and are written to the Feature Store with their full path and profit. Until Layer 3 is real, the spatial stub returns `None` and the engine searches the whole graph once.
 
 ### Layer 5 — Regime & Risk Engine
 Strain is not assumed to be a random walk — it's modelled as an Ornstein-Uhlenbeck process, `dX = θ(μ - X)dt + σdW`, which is the correct model for a quantity that gets pulled back toward an equilibrium rather than wandering freely. Calibrating θ, μ, and σ from the strain history gives a statistically grounded read on how fast this market self-corrects. An Augmented Dickey-Fuller test confirms whether that mean reversion is real or just noise, classifying each pair into a mean-reverting or trending regime — this is what gates Layer 4. Monte Carlo paths from the calibrated process then produce probabilistic features: probability of reversion within N seconds, expected time-to-reversion, and quantile-based risk bounds.
@@ -127,7 +128,7 @@ The interesting part is where these three disagree. If the graph looks structura
 
 ## The math in one paragraph
 
-Taking the log of exchange rates converts triangular arbitrage from a multiplicative to an additive problem: a loop is profitable when `Aᵢⱼ · Aⱼₖ · Aₖᵢ > 1`, equivalently `Wᵢⱼ + Wⱼₖ + Wₖᵢ < 0`, a negative-weight cycle Bellman-Ford finds in O(VE) time. The spectral gap of the graph Laplacian measures how fast such mispricings diffuse and close structurally; the tropical eigenvalue bounds the best achievable cycle without running detection at all; Tarjan SCC restricts search to the reachable, liquid portion of the graph. Separately, modelling strain as an Ornstein-Uhlenbeck process and testing it with Augmented Dickey-Fuller gives a second, independent estimate of the same efficiency concept — this time from the time-series dynamics rather than the graph's structure — and the two together produce more than either alone: a cross-validated read on whether the market is genuinely self-correcting right now.
+Taking the log of exchange rates converts triangular arbitrage from a multiplicative to an additive problem: a loop is profitable when `Aᵢⱼ · Aⱼₖ · Aₖᵢ > 1`, equivalently `Wᵢⱼ + Wⱼₖ + Wₖᵢ < 0`, a negative-weight cycle Bellman-Ford finds in O(VE) time. The spectral gap of the graph Laplacian measures how fast such mispricings diffuse and close structurally; the tropical (min-plus) eigenvalue is the minimum cycle mean of the weights — negative exactly when a profitable cycle exists — so it gates detection without running it at all; Tarjan SCC then shrinks the graph to the reachable, liquid portion, and Bellman-Ford runs on each smaller component (the L3 → L1 round trip). Separately, modelling strain as an Ornstein-Uhlenbeck process and testing it with Augmented Dickey-Fuller gives a second, independent estimate of the same efficiency concept — this time from the time-series dynamics rather than the graph's structure — and the two together produce more than either alone: a cross-validated read on whether the market is genuinely self-correcting right now.
 
 ---
 
@@ -139,9 +140,10 @@ Taking the log of exchange rates converts triangular arbitrage from a multiplica
 | K4 intra-venue graph (6 live pairs) | ✅ Done |
 | Multi-broker aggregator (Binance live, OANDA/IBKR mock) | ✅ Done |
 | FX graph + log transform | ✅ Done |
-| Bellman-Ford cycle detection | ✅ Done |
+| Bellman-Ford cycle detection (in L1 DataProcessing) | ✅ Done |
+| Subgraph reduction + per-SCC detection wiring (L3 → L1 round trip) | ✅ Done |
 | Multi-venue graph (asset × venue nodes, transfer edges) | 📋 Planned |
-| Spectral structure (Laplacian, λ₂, tropical eigenvalue, strain) | 🔧 In progress |
+| Spectral structure (Laplacian, λ₂, tropical min cycle mean, strain) | 🔧 In progress |
 | Spatial analysis + SCC pruning | 🔧 In progress |
 | OU calibration + ADF regime classification | 📋 Planned |
 | Regime-gated arbitrage detection | 📋 Planned |
