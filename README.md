@@ -166,3 +166,20 @@ Taking the log of exchange rates converts triangular arbitrage from a multiplica
 ## Disclaimer
 
 This is a research and feature-engineering tool, not an automated trading system. Detected cycles and regime classifications are logged for analysis, not executed. Live execution at retail scale competes against co-located, microsecond-latency infrastructure that this project has no intention of trying to beat — the value here is in the structural and statistical analysis, and in producing a defensible, testable dataset, not in chasing fleeting price gaps.
+
+---
+
+## Papers
+Layer1
+https://beei.org/index.php/EEI/article/view/10817/4836 - An innovative approach to identifying triangular arbitrage opportunities in financial markets using the Bellman-Ford algorithm Issam Akouaouch, Anas Bouayad
+
+Layer 2
+https://math.uchicago.edu/~may/REU2012/REUPapers/JiangJ.pdf Jiaqi Jiang - An introduction to Spectral Graph Theory
+https://commons.lib.jmu.edu/cgi/viewcontent.cgi?article=1303&context=honors201019 Bradley A.Mason Tropical algebra, graph theory, and foreign exchange 
+https://www.youtube.com/watch?v=yUjSgmzZky8 - Mihai Cucuringu's Lecture on Signed and Directed Graph Clustering in Financial Time Series 2026.05.05
+
+Layer 3
+https://www.cs.cmu.edu/~cdm/resources/Tarjan1972-sccs.pdf - Tarjan SCC, DEPTH-FIRST SEARCH AND LINEAR GRAPH ALGORITHMS
+
+Layer 4
+https://arxiv.org/pdf/2111.11609 - Pricing cryptocurrencies : Modelling the ETHBTC spot-quotient variation as a diffusion process. Sidharth Mallik
