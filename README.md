@@ -142,7 +142,7 @@ Taking the log of exchange rates converts triangular arbitrage from a multiplica
 | FX graph + log transform | ✅ Done |
 | Bellman-Ford cycle detection (in L1 DataProcessing) | ✅ Done |
 | Subgraph reduction + per-SCC detection wiring (L3 → L1 round trip) | ✅ Done |
-| Multi-venue graph (asset × venue nodes, transfer edges) | 📋 Planned |
+| Multi-venue graph (asset × venue nodes, transfer edges) | ✅ Done |
 | Spectral structure (Laplacian, λ₂, tropical min cycle mean, strain) | 🔧 In progress |
 | Spatial analysis + SCC pruning | 🔧 In progress |
 | OU calibration + ADF regime classification | 📋 Planned |
