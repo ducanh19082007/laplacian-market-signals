@@ -4,6 +4,8 @@ A real-time, cross-venue market structure engine for cryptocurrency exchange rat
 
 > Currently streaming Binance (BTC, ETH, BNB, SOL) over a K4 intra-venue graph, with OANDA and IBKR wired in as mock feeds pending real broker integration.
 
+Disclaimer: This repo also has Claude as a big help. Hence if there exists certain errors or unreadable code, such as URLmethods.py, then excuse me.
+
 ---
 
 ## How it works
@@ -169,14 +171,14 @@ This is a research and feature-engineering tool, not an automated trading system
 
 ---
 
-## Papers
+## Papers/References
+
 Layer1
 https://beei.org/index.php/EEI/article/view/10817/4836 - An innovative approach to identifying triangular arbitrage opportunities in financial markets using the Bellman-Ford algorithm Issam Akouaouch, Anas Bouayad
 
 Layer 2
 https://math.uchicago.edu/~may/REU2012/REUPapers/JiangJ.pdf Jiaqi Jiang - An introduction to Spectral Graph Theory
 https://commons.lib.jmu.edu/cgi/viewcontent.cgi?article=1303&context=honors201019 Bradley A.Mason Tropical algebra, graph theory, and foreign exchange 
-https://www.youtube.com/watch?v=yUjSgmzZky8 - Mihai Cucuringu's Lecture on Signed and Directed Graph Clustering in Financial Time Series 2026.05.05
 
 Layer 3
 https://www.cs.cmu.edu/~cdm/resources/Tarjan1972-sccs.pdf - Tarjan SCC, DEPTH-FIRST SEARCH AND LINEAR GRAPH ALGORITHMS

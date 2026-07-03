@@ -109,6 +109,8 @@ class ExchangeRateGraph:
         # you didn't make a profit—you just paid $1.45 for the privilege of trading.
         #remember, other than the venues-transaction-fees and the current-transaction-fee
         #there always a fixed fee, and the min_nominal is use to account on this.
+        
+        #to put thing simple, it is the smallest posible transaction size
         self.min_notional = {k.lower(): v for k, v in (min_notional or {}).items()}
         
         self.adjacency: Dict[Node, Dict[Node, dict]] = {} #the adjacent matrix, our output
@@ -312,61 +314,6 @@ class ExchangeRateGraph:
             if u in keep
         }
         return sub
-
-    def find_arbitrage(self) -> Optional[List[Node]]:
-        """
-        Bellman-Ford over the log-weights. Returns one node cycle whose rates
-        multiply to > 1 (an arbitrage loop), or None if the market is arb-free.
-        
-        If an arbitrage path exists, it returns a readable execution route like:
-        [("btc", "Binance"), ("eth", "Binance"), ("eth", "Kraken"), ("btc", "Binance")]
-
-        Call log_transform() first.
-        
-        highly recommend this video: https://www.youtube.com/watch?v=B5PmlJACZ9Y  for Bellman-Ford comprehension  
-        """
-        if any(a["weight"] is None for _, _, a in self.edges()):
-            self.log_transform();
-
-        nodes = self.nodes()
-        if not nodes:
-            return None
-
-        dist = {n: 0.0 for n in nodes}          # 0 init => detects any neg cycle
-        pred: Dict[Node, Optional[Node]] = {n: None for n in nodes} #this is like the table from that video up there
-        edges = self.edges()
-
-        updated = None
-        for _ in range(len(nodes)): #run O(|V| ) cycle
-            updated = None
-            for u, v, a in edges: # this, too. Hence we have O(|V|*|E|)
-                if dist[u] + a["weight"] < dist[v] - 1e-12:
-                    dist[v] = dist[u] + a["weight"]
-                    pred[v] = u
-                    updated = v
-            if updated is None:
-                return None  # converged, no negative cycle, if at some point, all the nodes sources
-            #and the edges doesnt dissimilar to the bellman-ford  inequality, then updated still remain None.
-
-        # `updated` sits on or downstream of a negative cycle; walk back len(nodes)
-        # steps so we're guaranteed to land ON the cycle. Every node visited here
-        # has a predecessor (it was relaxed), so pred[...] is never None.
-        assert updated is not None  # loop only exits here if a relaxation happened, put this as a precaution
-        node: Node = updated
-        for _ in range(len(nodes)): #do 1 loop one more time to check if the pred[...] is ACTUALLY never None or no
-            prev = pred[node]
-            assert prev is not None
-            node = prev
-
-        start = node #as said before, the updated note will guarantee land on the neg cycle
-        cycle: List[Node] = [start]
-        cur = pred[start]
-        while cur is not None and cur != start:
-            cycle.append(cur)
-            cur = pred[cur]
-        cycle.append(start)
-        cycle.reverse()
-        return cycle
 
     def cycle_return(self, cycle: List[Node]) -> float:
         """Product of rates around a node cycle (>1 means profit). 0 if broken."""
