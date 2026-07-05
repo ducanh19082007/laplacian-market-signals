@@ -1,5 +1,5 @@
-# L3 — Tarjan SCC + per-component Bellman-Ford (Python half of Option B).
-#
+# L3 — Tarjan SCC + per-component Bellman-Ford
+
 # In L1 subgraph() vs Tarjan SCC — two halves of the same step.
 # They aren't competing things; they're producer and consumer. Tarjan decides
 # which nodes form a strongly-connected component (a cycle can only ever live

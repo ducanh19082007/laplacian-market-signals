@@ -366,7 +366,10 @@ class MultiBrokerOrderBook:
                 # Clear the screen every tick so previous frames never pile up.
                 print("\033[H\033[J", end="")
                 if show_box:
-                    right = ["ARBITRAGE DETECTIONS", "-" * 20]
+                    right = [f"ARBITRAGE DETECTIONS:" + 
+                             f" Refresh Interval: {self.refresh_interval}," +
+                             f" Fee: {self.fee}," +
+                             f" Transfer cost: {self.transfer_cost}", "-" * 20]
                     right += list(log) if log else ["(none yet)"]
                     print(self._render_side_by_side(self._exchange_rate_box(box_rows), right))
                 else:

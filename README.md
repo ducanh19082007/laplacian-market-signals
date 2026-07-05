@@ -90,6 +90,15 @@ Nodes are `(asset, venue)` pairs, not just assets — `BTC@Binance` and `BTC@Coi
 
 ---
 
+## Initializing
+
+\ python L3_TarjanSCC/TarjanSCC.py 
+\ python -m L3_TarjanSCC.TarjanSCC
+\ from L3_TarjanSCC.TarjanSCC import find_all_arbitrage
+\ cd L3_TarjanSCC && python setup.py build_ext --inplace
+
+---
+
 ## Architecture
 
 ### Layer 1 — Data Preprocessing

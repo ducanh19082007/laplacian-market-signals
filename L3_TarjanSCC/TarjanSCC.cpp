@@ -217,7 +217,11 @@ std::vector<int> bellman_ford_cycle(const std::vector<int>& members,
     return cycle;
 }
 
-} // namespace
+} // anonymous namespace, meaning the previous 2 functions of Tarjan and Bellman-Ford
+//are only visible in this c++ file only. This is used to avoid potential linker conflicts
+// with another source that defines helper function such as tarjan_scc or bellman_ford_cycle
+// with the same name Since only find_all_arbitrage() is part of the public Python API, the remaining helper
+// implementations are intentionally kept private.
 
 // One closed cycle per non-trivial SCC. Singletons (size 1, no self-loop in this
 // graph) can't hold a cycle, so they're skipped -- that's the pruning win.
@@ -263,7 +267,9 @@ std::vector<std::vector<int>> find_all_arbitrage(
 //the rest should look at setup.py, more explaination will be given in the paper.
 PYBIND11_MODULE(tarjan_arb, m) {
     m.doc() = "L3: Tarjan SCC + per-component Bellman-Ford loop arbitrage search";
-    m.def("find_all_arbitrage", &find_all_arbitrage,
+    m.def("find_all_arbitrage", &find_all_arbitrage, // name of the function we have in
+        //the custom library we made with certain py:: arguments we had before 
+        // py:: is actually pybind11:: but we changed it name
           py::arg("num_nodes"), py::arg("edges"),
           "Return one closed arbitrage cycle (node-id path) per SCC that holds one.");
 }
