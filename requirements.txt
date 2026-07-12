@@ -36,6 +36,7 @@ pyparsing==3.3.2
 pytest==9.1.1
 python-dateutil==2.9.0.post0
 pyzmq==27.1.0
+scipy==1.18.0
 setuptools==82.0.1
 six==1.17.0
 stack-data==0.6.3
@@ -44,3 +45,4 @@ traitlets==5.15.1
 typing_extensions==4.15.0
 wcwidth==0.8.1
 websockets==16.0
+PyQt5==5.15.11  # GUI backend for the L4 live_dashboard popup (WSLg: QT_QPA_PLATFORM=wayland)
