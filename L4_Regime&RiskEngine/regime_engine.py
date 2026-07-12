@@ -289,6 +289,8 @@ def run_popup(feed, state: RegimeState, args) -> None:
             ax.set_title("warming up the feed...")
             return
         xs, lam, fie, reg = xs[:n], lam[:n], fie[:n], reg[:n]
+        lo = max(0, n - args.window)                 # ROLLING window: keep only the last W samples
+        xs, lam, fie, reg = xs[lo:], lam[lo:], fie[lo:], reg[lo:]
         cols = [_RGB.get(r, "#999999") for r in reg]
 
         # ---- top: arb intensity lambda (left) + connectivity lambda2 (right), points
@@ -309,6 +311,8 @@ def run_popup(feed, state: RegimeState, args) -> None:
                      f"lambda2={_fmt(fie[-1])}   comps drive FRAGMENTING")
         ax.legend(loc="upper left", fontsize=8)
         ax.grid(alpha=0.2)
+        if xs[-1] > xs[0]:
+            ax.set_xlim(xs[0], xs[-1])               # scroll with the rolling window (twinx shares x)
 
         # ---- bottom: the 2-D REGIME MAP. Where the market lives in
         #      (connectivity, arb-intensity) space; the last point is where it is NOW.
@@ -388,6 +392,8 @@ def main() -> None:
         description="L4 Regime & Risk Engine: classify the market regime each tick from "
                     "the tropical eigenvalue (arb intensity) and Fiedler value (connectivity).")
     ap.add_argument("--interval", type=float, default=0.5, help="seconds between samples")
+    ap.add_argument("--window", type=int, default=120,
+                    help="rolling window (samples) shown on the graph; older points scroll off")
     ap.add_argument("--fee", type=float, default=0.00023, help="per-hop fee tau (sets the stress threshold)")
     ap.add_argument("--stress-mult", type=float, default=5.0,
                     help="STRESSED when arb intensity lambda > this * tau")
