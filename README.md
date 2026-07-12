@@ -168,7 +168,7 @@ Taking the log of exchange rates converts triangular arbitrage from a multiplica
 | Multi-venue graph (asset × venue nodes, transfer edges) | ✅ Done |
 | Spectral structure (Laplacian, λ₂, tropical eigenvalue, strain) | ✅ Done |
 | Regime engine (spectral EFFICIENT / STRESSED / FRAGMENTING classifier) | ✅ Done |
-| Spatial analysis + SCC pruning | 🔧 In progress |
+| Spatial analysis + SCC pruning | ✅ Done |
 | OU arbitrage forecasting | ❌ Shelved — no 1 Hz predictability (archived) |
 | Regime-gated arbitrage detection | 📋 Planned |
 | Feature store + forward labels | 📋 Planned |
@@ -182,8 +182,6 @@ Taking the log of exchange rates converts triangular arbitrage from a multiplica
 - **Python** — core pipeline, asyncio event loop
 - **websockets** — multi-venue order book feeds
 - **numpy / scipy** — Laplacian construction, eigenvalue computation, OU calibration
-- **statsmodels** *(planned)* — Augmented Dickey-Fuller test for regime classification
-- **Go** *(planned)* — execution layer for sub-millisecond order dispatch per venue
 
 ---
 
