@@ -5,3 +5,9 @@
 L3_TarjanSCC/build/
 __pycache__/
 *.pyc
+
+# L4 OU backtest render outputs (regenerate: python "L4_Regime&RiskEngine/OUArbitrage.py")
+ou_backtest.png
+ou_rolling.gif
+ou_live_backtest.png
+ou_live_rolling.gif
