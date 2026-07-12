@@ -438,7 +438,13 @@ def build_default_feed(
     "icp",
     "ena",
     "sei",
-    "tao"
+    "tao",
+
+    # Density batch: more liquid, broadly cross-listed names so the L2/L4 regime graph
+    # gets more nodes and edges (a richer lambda_2 / connectivity signal). Venues that
+    # don't list a given name just show N/A -- harmless, per the subscription notes above.
+    "mkr", "grt", "mana", "sand", "comp", "snx", "crv",
+    "xtz", "chz", "bat", "enj", "gala", "ldo", "imx", "egld",
 ]
     quote_priority = QUOTE_ASSETS + ALTS
     assets = QUOTE_ASSETS + ALTS

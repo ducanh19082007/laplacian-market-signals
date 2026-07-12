@@ -41,6 +41,8 @@ Run (from the repo root):
     python "L4_Regime&RiskEngine/regime_engine.py" --loose         # theoretical-arb feed
 
 Author: Anh Duc Le
+L4 regime & risk engine co-developed with Claude (Opus 4.8, 1M context).
+(The L2 tropical eigenvalue and Fiedler value it builds on are Anh Duc Le's work.)
 """
 
 import argparse
@@ -385,7 +387,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(
         description="L4 Regime & Risk Engine: classify the market regime each tick from "
                     "the tropical eigenvalue (arb intensity) and Fiedler value (connectivity).")
-    ap.add_argument("--interval", type=float, default=1.0, help="seconds between samples")
+    ap.add_argument("--interval", type=float, default=0.5, help="seconds between samples")
     ap.add_argument("--fee", type=float, default=0.00023, help="per-hop fee tau (sets the stress threshold)")
     ap.add_argument("--stress-mult", type=float, default=5.0,
                     help="STRESSED when arb intensity lambda > this * tau")
