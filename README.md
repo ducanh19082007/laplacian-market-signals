@@ -52,15 +52,15 @@ flowchart TD
     end
 
     subgraph F["5. Regime & Risk Engine"]
-        F1["OU Calibration on Strain<br/>θ, μ, σ"]
-        F2["ADF Test<br/>Mean-Reverting vs Trending"]
-        F3["Monte Carlo<br/>Reversion Probability"]
-        F1 --> F2
+        F1["Tropical eigenvalue λ<br/>arbitrage intensity"]
+        F2["Fiedler λ₂ + components<br/>connectivity / fragmentation"]
+        F3["Classify regime<br/>EFFICIENT / STRESSED / FRAGMENTING"]
+        F1 --> F3
         F2 --> F3
     end
 
     D -->|SCC node-sets| E
-    F -->|gates: trust a cycle only if<br/>its pair is mean-reverting| E
+    F -->|regime context: arb is real in STRESSED,<br/>competed away in EFFICIENT| E
 
     subgraph E["4. Arbitrage Detection — L3 → L1 round trip"]
         E0["g.subgraph(SCC)<br/>shrink the adjacency"]
@@ -117,7 +117,18 @@ This is the layer that actually makes the graph smaller. Tarjan's algorithm find
 There is no standalone detection layer. Detection is the loop closing back on Layer 1: for each SCC node-set Layer 3 marks tradeable, the engine calls `ExchangeRateGraph.subgraph(scc)` to shrink the adjacency, then runs that smaller graph's own `find_arbitrage()` — the Bellman-Ford that already lives in L1's DataProcessing. This turns the `O(V·E)` sweep over the whole graph into a sum over tiny components. Detection runs only on cycles that Layer 5 confirms are in a statistically mean-reverting regime — a cycle in a trending or random-walk regime might widen instead of close, so a negative cycle there is not the same thing as real arbitrage. Surviving cycles pass a cost filter (spread, depth, transfer fees) and are written to the Feature Store with their full path and profit. Until Layer 3 is real, the spatial stub returns `None` and the engine searches the whole graph once.
 
 ### Layer 5 — Regime & Risk Engine
-Strain is not assumed to be a random walk — it's modelled as an Ornstein-Uhlenbeck process, `dX = θ(μ - X)dt + σdW`, which is the correct model for a quantity that gets pulled back toward an equilibrium rather than wandering freely. Calibrating θ, μ, and σ from the strain history gives a statistically grounded read on how fast this market self-corrects. An Augmented Dickey-Fuller test confirms whether that mean reversion is real or just noise, classifying each pair into a mean-reverting or trending regime — this is what gates Layer 4. Monte Carlo paths from the calibrated process then produce probabilistic features: probability of reversion within N seconds, expected time-to-reversion, and quantile-based risk bounds.
+This layer no longer tries to *forecast* arbitrage. An earlier version modelled the tropical eigenvalue as an Ornstein-Uhlenbeck process and forecast whether the next tick would clear the fee — but on a 1-second tape that eigenvalue has ~zero one-step autocorrelation, and any opening reverts in well under the round-trip execution latency, so a *tradeable* forecast is not possible at this observation scale. That is the market being efficient, not the model failing. (The OU work is preserved on the `archive/ou-arbitrage-attempt` branch.)
+
+So Layer 5 **measures** the market's regime rather than predicting it, from two spectra of the live graph every tick:
+- **arbitrage intensity** — the tropical (max-plus) eigenvalue `λ`: the best per-hop cycle return, i.e. how mispriced the market is right now;
+- **connectivity** — the Fiedler value `λ₂` (algebraic connectivity of the *unweighted* Laplacian, so zero-cost cross-venue transfer edges don't spuriously split the graph) plus the number of connected components. Unlike the single-tick arb spikes, connectivity is *persistent*, so it is actually usable at 1 Hz.
+
+Each tick is classified into one of three regimes:
+- **EFFICIENT** — connected and quiet: `λ` at/under the fee, prices consistent across venues (the normal, well-arbitraged state);
+- **STRESSED** — still one connected market, but `λ` far above the fee: large dislocations are open (a fast move, one venue lagging, a volatility spike) while the graph is structurally intact;
+- **FRAGMENTING** — the graph has split into ≥ 2 components (or `λ₂ ≈ 0`): venues/assets decoupling, liquidity withdrawing. The top structural risk, so it overrides regardless of `λ`.
+
+`regime_engine.py` streams this live — a terminal readout plus a rolling 2-D regime map of connectivity vs arbitrage-intensity — and ships an offline `--demo` that classifies all three regimes with no feed. ADF/Monte-Carlo reversion features remain a possible future add-on, but only for connectivity, which has the persistence the arb intensity lacks.
 
 ### Layer 6 — Execution Engine *(planned)*
 Async order routing and atomic cross-leg execution, built only on signals that have cleared the regime gate and the feature store's validation. Not the current focus.
@@ -155,9 +166,10 @@ Taking the log of exchange rates converts triangular arbitrage from a multiplica
 | Bellman-Ford cycle detection (in L1 DataProcessing) | ✅ Done |
 | Subgraph reduction + per-SCC detection wiring (L3 → L1 round trip) | ✅ Done |
 | Multi-venue graph (asset × venue nodes, transfer edges) | ✅ Done |
-| Spectral structure (Laplacian, λ₂, tropical min cycle mean, strain) | 🔧 In progress |
+| Spectral structure (Laplacian, λ₂, tropical eigenvalue, strain) | ✅ Done |
+| Regime engine (spectral EFFICIENT / STRESSED / FRAGMENTING classifier) | ✅ Done |
 | Spatial analysis + SCC pruning | 🔧 In progress |
-| OU calibration + ADF regime classification | 📋 Planned |
+| OU arbitrage forecasting | ❌ Shelved — no 1 Hz predictability (archived) |
 | Regime-gated arbitrage detection | 📋 Planned |
 | Feature store + forward labels | 📋 Planned |
 | ML model / signal validation | 📋 Planned |
