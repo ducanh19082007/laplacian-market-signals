@@ -385,7 +385,27 @@ class MultiBrokerOrderBook:
 
 
 
-if __name__ == "__main__":
+_KEEP_DEFAULT_NOTIONAL = object()   # sentinel: "use the built-in MIN_NOTIONAL"
+
+
+def build_default_feed(
+    refresh_interval: float = 0.01,
+    fee: float = 0.00015,
+    max_quote_age: float = 1.0,
+    quote_window: float = 0.2,
+    min_notional=_KEEP_DEFAULT_NOTIONAL,
+    verbose: bool = False,
+) -> "MultiBrokerOrderBook":
+    """
+    The rich 6-venue example universe (Binance, Coinbase, Kraken, OKX, Gemini,
+    Bitstamp) over ~45 cross-listed assets, returned as an already-streaming feed.
+
+    This is exactly the wiring the __main__ demo below uses, factored out so the
+    upper layers (L2 TropicalEigenvalue, L4 OUArbitrage / live_ou / live_dashboard)
+    can drive the SAME live graph for their examples and backtests instead of a
+    smaller hand-rolled config. The websocket threads start on construction, so the
+    returned feed is live the moment you get it.
+    """
     # Larger universe of liquid, cross-listed assets so the L1->L4 graph has enough
     # nodes/edges to be worth running -- but still only names with deep books on all
     # three venues, so quotes stay fresh inside max_quote_age instead of going N/A.
@@ -537,10 +557,11 @@ if __name__ == "__main__":
 
     broker_configs = [binance, coinbase, kraken, okx, gemini, bitstamp]
 
-    coinbase_sub = URL_methods.make_coinbase_subscription_message(my_pairs, assets)
-    kraken_sub   = URL_methods.make_kraken_subscription_message(my_pairs, assets)
-    print(f"Coinbase subscription:\n{json.dumps(coinbase_sub, indent=2)}\n")
-    print(f"Kraken subscription:\n{json.dumps(kraken_sub, indent=2)}\n")
+    if verbose:
+        coinbase_sub = URL_methods.make_coinbase_subscription_message(my_pairs, assets)
+        kraken_sub   = URL_methods.make_kraken_subscription_message(my_pairs, assets)
+        print(f"Coinbase subscription:\n{json.dumps(coinbase_sub, indent=2)}\n")
+        print(f"Kraken subscription:\n{json.dumps(kraken_sub, indent=2)}\n")
 
     # Minimum tradeable top-of-book notional per quote currency. An edge survives
     # only if its best quote is good for at least this much -- so a thin/mispriced
@@ -551,25 +572,34 @@ if __name__ == "__main__":
         "usd": 50.0, "usdt": 50.0, "usdc": 50.0, "eur": 50.0, "gbp": 50.0,
         "btc": 0.0005, "eth": 0.02,
     }
+    # Callers can override the depth filter: pass None to DISABLE it entirely (lets
+    # thin/mispriced top-of-book through -> far more phantom/"theoretical" arb shows
+    # up), or pass a dict to tighten/loosen it. Default keeps the built-in thresholds.
+    if min_notional is not _KEEP_DEFAULT_NOTIONAL:
+        MIN_NOTIONAL = min_notional
 
     #for this test run, i will deliberately picked the fee, transaction fee, and nominal min to
     #be a bit naive to see how it run. those variables also is not detailed enough
     #given they are being generalized anyway.
     multi_broker = MultiBrokerOrderBook(
         broker_configs,
-        refresh_interval=0.01,
-        assets=assets,          # enables the live (asset x venue) graph + arbitrage view
-        fee=0.0001,             # 0.20% taker fee per convert leg -- kills sub-fee phantom arb from Kraken
-        max_quote_age=1.0,      # absolute backstop: ignore any quote not refreshed in the last 1s
-        quote_window=0.2,       # legs of a cycle must be within 0.5s of each other (kills stale-leg phantoms)
-        min_notional=MIN_NOTIONAL,  # drop edges whose top-of-book is too thin to trade
+        refresh_interval=refresh_interval,
+        assets=assets,                # enables the live (asset x venue) graph + arbitrage view
+        fee=fee,                      # taker fee per convert leg -- kills sub-fee phantom arb
+        max_quote_age=max_quote_age,  # absolute backstop: ignore quotes not refreshed within this
+        quote_window=quote_window,    # legs of a cycle must be within this of each other
+        min_notional=MIN_NOTIONAL,    # drop edges whose top-of-book is too thin to trade
     )
+    return multi_broker
 
+
+if __name__ == "__main__":
     # Live exchange-rate box on the left + arbitrage detections on the right.
     # Set show_box=False for a plain scrolling arbitrage log instead.
     # min_profit=0.0 shows every net-positive cycle after fees; raise it (e.g.
     # 0.0005) to only surface opportunities clearing an extra 0.05%.
-    multi_broker.stream_arbitrage(only_on_change=True, show_box=True, min_profit=0.0)
+    feed = build_default_feed(verbose=True)
+    feed.stream_arbitrage(only_on_change=True, show_box=True, min_profit=0.0)
 
     # Snapshot order-book table instead (clears the screen each tick):
-    # multi_broker.run_live()
+    # feed.run_live()
