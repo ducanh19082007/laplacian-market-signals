@@ -128,6 +128,10 @@ Each tick is classified into one of three regimes:
 - **STRESSED** — still one connected market, but `λ` far above the fee: large dislocations are open (a fast move, one venue lagging, a volatility spike) while the graph is structurally intact;
 - **FRAGMENTING** — the graph has split into ≥ 2 components (or `λ₂ ≈ 0`): venues/assets decoupling, liquidity withdrawing. The top structural risk, so it overrides regardless of `λ`.
 
+![alt text](image.png)
+
+![alt text](image-3.png)
+
 `regime_engine.py` streams this live — a terminal readout plus a rolling 2-D regime map of connectivity vs arbitrage-intensity — and ships an offline `--demo` that classifies all three regimes with no feed. ADF/Monte-Carlo reversion features remain a possible future add-on, but only for connectivity, which has the persistence the arb intensity lacks.
 
 ### Layer 6 — Execution Engine *(planned)*
@@ -168,7 +172,7 @@ Taking the log of exchange rates converts triangular arbitrage from a multiplica
 | Multi-venue graph (asset × venue nodes, transfer edges) | ✅ Done |
 | Spectral structure (Laplacian, λ₂, tropical eigenvalue, strain) | ✅ Done |
 | Regime engine (spectral EFFICIENT / STRESSED / FRAGMENTING classifier) | ✅ Done |
-| Spatial analysis + SCC pruning | 🔧 In progress |
+| Spatial analysis + SCC pruning | ✅ Done |
 | OU arbitrage forecasting | ❌ Shelved — no 1 Hz predictability (archived) |
 | Regime-gated arbitrage detection | 📋 Planned |
 | Feature store + forward labels | 📋 Planned |
@@ -182,9 +186,6 @@ Taking the log of exchange rates converts triangular arbitrage from a multiplica
 - **Python** — core pipeline, asyncio event loop
 - **websockets** — multi-venue order book feeds
 - **numpy / scipy** — Laplacian construction, eigenvalue computation, OU calibration
-- **statsmodels** *(planned)* — Augmented Dickey-Fuller test for regime classification
-- **Go** *(planned)* — execution layer for sub-millisecond order dispatch per venue
-
 ---
 
 ## Disclaimer
