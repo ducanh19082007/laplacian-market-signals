@@ -373,16 +373,27 @@ if __name__ == "__main__":
     },
 }
 
+    # Detection lives in L3 (Tarjan SCC + Bellman-Ford, C++). Imported here inside
+    # __main__, not at module top: a top-level import would be circular, since L3
+    # imports ExchangeRateGraph from this module. Put the repo root on sys.path so
+    # this resolves whether run as `python -m L1_DataProcessing.DataProcessing`
+    # (root already on path) or by file path `python .../DataProcessing.py`
+    # (only this dir is on path) -- the same dance the other layers use.
+    import os
+    import sys
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from L3_TarjanSCC.TarjanSCC import find_all_arbitrage
+
     graph = ExchangeRateGraph(assets, transfer_cost=0.0, quote_window=0.1).build_from_snapshot(snapshot)
     graph.log_transform()
     print(graph.summary())
 
-    cycle = graph.find_arbitrage()
-    if cycle:
-        path = " -> ".join(ExchangeRateGraph.fmt(n) for n in cycle)
-        ret = graph.cycle_return(cycle)
-        print(f"\nArbitrage cycle: {path}")
-        print(f"Return multiple : {ret:.8f}  ({(ret - 1) * 100:+.4f}%)")
+    found = find_all_arbitrage(graph)
+    if found:
+        for cycle, ret in found:
+            path = " -> ".join(ExchangeRateGraph.fmt(n) for n in cycle)
+            print(f"\nArbitrage cycle: {path}")
+            print(f"Return multiple : {ret:.8f}  ({(ret - 1) * 100:+.4f}%)")
     else:
         print("\nNo arbitrage cycle found.")
         
@@ -391,11 +402,11 @@ if __name__ == "__main__":
     graph1.log_transform()
     print(graph1.summary())
 
-    cycle1 = graph1.find_arbitrage()
-    if cycle1:
-        path1 = " -> ".join(ExchangeRateGraph.fmt(n) for n in cycle1)
-        ret1 = graph1.cycle_return(cycle1)
-        print(f"\nArbitrage cycle: {path1}")
-        print(f"Return multiple : {ret1:.8f}  ({(ret1 - 1) * 100:+.4f}%)")
+    found1 = find_all_arbitrage(graph1)
+    if found1:
+        for cycle1, ret1 in found1:
+            path1 = " -> ".join(ExchangeRateGraph.fmt(n) for n in cycle1)
+            print(f"\nArbitrage cycle: {path1}")
+            print(f"Return multiple : {ret1:.8f}  ({(ret1 - 1) * 100:+.4f}%)")
     else:
         print("\nNo arbitrage cycle found.")

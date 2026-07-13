@@ -17,8 +17,8 @@
 #   3. map the returned int-id cycles back to node tuples.
 #
 # This REPLACES the older Option-A plan (Tarjan returns node-sets -> Python
-# subgraph() -> Python find_arbitrage()). subgraph()/find_arbitrage() in L1 stay
-# as the pure-Python reference path for testing and for when the .so isn't built.
+# subgraph() -> Python find_arbitrage()). find_arbitrage() has been removed from L1;
+# L3 is now the ONLY detection path. (subgraph() remains as an L1 graph helper.)
 #
 # Round trip:
 #   graph.log_transform()                 # weights = -ln(rate), done in L1

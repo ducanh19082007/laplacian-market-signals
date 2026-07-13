@@ -1,5 +1,8 @@
 .venv/
 
+# feature-store data logs (improvement B) -- gathered per run, never committed
+data/
+
 # L3 C++ build artifacts (rebuild with: cd L3_TarjanSCC && python setup.py build_ext --inplace)
 *.so
 L3_TarjanSCC/build/

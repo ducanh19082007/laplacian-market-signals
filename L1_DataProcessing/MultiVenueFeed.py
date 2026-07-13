@@ -23,18 +23,14 @@ except:
     
     from URLmethods import URL_methods
 
-# L3 (Tarjan SCC + per-SCC Bellman-Ford) is the fast path: it shrinks the graph to
-# its strongly-connected components and only searches inside each, instead of the
-# whole-graph O(V*E) sweep. But it needs the compiled C++ extension. If that isn't
-# built, fall back to L1's whole-graph find_arbitrage, wrapped to match L3's
-# [(cycle, return), ...] shape -- so MultiVenueFeed still runs, just without the
-# SCC pruning win. Either way stream_arbitrage below consumes the same contract.
-try:
-    from L3_TarjanSCC.TarjanSCC import find_all_arbitrage
-except ImportError:
-    def find_all_arbitrage(graph: "ExchangeRateGraph"):
-        cycle = graph.find_arbitrage()
-        return [(cycle, graph.cycle_return(cycle))] if cycle else []
+# L3 (Tarjan SCC + per-SCC Bellman-Ford, in C++) is the ONLY detection path: it
+# shrinks the graph to its strongly-connected components and searches inside each,
+# instead of a whole-graph O(V*E) sweep. It needs the compiled extension -- if the
+# import fails, TarjanSCC raises a clear "not built" error with the build command
+# (cd L3_TarjanSCC && python setup.py build_ext --inplace). There is no pure-Python
+# fallback: the old L1 Bellman-Ford (find_arbitrage) was removed in favour of L3.
+# stream_arbitrage below consumes its [(cycle, return), ...] contract.
+from L3_TarjanSCC.TarjanSCC import find_all_arbitrage
 
 
 # NOTE: Binance and Coinbase Advanced Trade use real WebSocket depth/book streams.
@@ -188,19 +184,21 @@ class MultiBrokerOrderBook:
         return graph
 
     def print_arbitrage(self) -> None:
-        """Build the graph from the live snapshot and report any arbitrage cycle."""
+        """Build the graph from the live snapshot and report any arbitrage cycles."""
         graph = self.build_graph()
         if graph is None:
             return
         print("\n--- Graph (asset x venue) Arbitrage ---")
-        cycle = graph.find_arbitrage()
-        if cycle:
+        found = find_all_arbitrage(graph)       # L3: one (cycle, return) per SCC
+        if not found:
+            print("No arbitrage cycle (market is arb-free or feed still warming up).")
+            return
+        for cycle, ret in found:
+            if not cycle:
+                continue
             path = " -> ".join(ExchangeRateGraph.fmt(n) for n in cycle)
-            ret = graph.cycle_return(cycle)
             print(f"Cycle : {path}")
             print(f"Return: {ret:.8f}  ({(ret - 1) * 100:+.4f}%)")
-        else:
-            print("No arbitrage cycle (market is arb-free or feed still warming up).")
 
     def run_live(self, clear_screen: bool = True) -> None:
         """
