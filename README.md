@@ -154,12 +154,6 @@ The interesting part is where these three disagree. If the graph looks structura
 
 ---
 
-## The math in one paragraph
-
-Taking the log of exchange rates converts triangular arbitrage from a multiplicative to an additive problem: a loop is profitable when `Aᵢⱼ · Aⱼₖ · Aₖᵢ > 1`, equivalently `Wᵢⱼ + Wⱼₖ + Wₖᵢ < 0`, a negative-weight cycle Bellman-Ford finds in O(VE) time. The spectral gap of the graph Laplacian measures how fast such mispricings diffuse and close structurally; the tropical (min-plus) eigenvalue is the minimum cycle mean of the weights — negative exactly when a profitable cycle exists — so it gates detection without running it at all; Tarjan SCC then shrinks the graph to the reachable, liquid portion, and Bellman-Ford runs on each smaller component (the L3 → L1 round trip). Separately, modelling strain as an Ornstein-Uhlenbeck process and testing it with Augmented Dickey-Fuller gives a second, independent estimate of the same efficiency concept — this time from the time-series dynamics rather than the graph's structure — and the two together produce more than either alone: a cross-validated read on whether the market is genuinely self-correcting right now.
-
----
-
 ## Current status
 
 | Layer | Status |
@@ -186,7 +180,7 @@ Taking the log of exchange rates converts triangular arbitrage from a multiplica
 
 - **Python** — core pipeline, asyncio event loop
 - **websockets** — multi-venue order book feeds
-- **numpy / scipy** — Laplacian construction, eigenvalue computation, OU calibration
+- **numpy / scipy** — Laplacian construction, eigenvalue computation
 ---
 
 ## Disclaimer

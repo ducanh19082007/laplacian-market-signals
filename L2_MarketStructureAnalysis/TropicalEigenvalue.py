@@ -1,4 +1,4 @@
-#karp :) https://commons.lib.jmu.edu/cgi/viewcontent.cgi?article=1303&context=honors201019
+#karp algo simplification/ :) https://commons.lib.jmu.edu/cgi/viewcontent.cgi?article=1303&context=honors201019
 #also tropical eigenvalue = max (max SCC_i) the graph will take from the Tarjan SCC
 #interpretation:
 #   In the MAX-PLUS (tropical) semiring, the eigenvalue of a weighted digraph's
