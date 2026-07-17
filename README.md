@@ -1,4 +1,4 @@
-# FOREX_farming
+# laplacian-market-signals
 
 A real-time, cross-venue market structure engine for cryptocurrency exchange rates. It builds a live directed graph of currency pairs across multiple brokers, analyses the graph's structure and dynamics, and turns that analysis into three concrete outputs: a **market health signal**, a **per-pair regime classification**, **and ML feature engineering for trading signals**.
 
@@ -6,6 +6,87 @@ A real-time, cross-venue market structure engine for cryptocurrency exchange rat
 
 Disclaimer: This repo also has Claude as a big help. Hence if there exists certain errors or unreadable code, such as URLmethods.py, then excuse me.
 
+Inspiration:
+
+[1] D. A. Spielman, "Spectral and Algebraic Graph Theory," Yale University.
+    Available: http://cs-www.cs.yale.edu/homes/spielman/sagt/sagt.pdf (*)
+
+[2] I. Akouaouch and A. Bouayad,
+    "An innovative approach to identifying triangular arbitrage opportunities
+    in financial markets using the Bellman-Ford algorithm."
+
+[3] J. Jiang,
+    "An Introduction to Spectral Graph Theory."
+
+[4] B. A. Mason,
+    "Tropical Algebra, Graph Theory, and Foreign Exchange."
+
+[5] R. E. Tarjan,
+    "Depth-First Search and Linear Graph Algorithms,"
+    SIAM Journal on Computing, vol. 1, no. 2, pp. 146–160, 1972.
+
+[6] S. Mallik,
+    "Pricing Cryptocurrencies: Modelling the ETHBTC Spot-Quotient Variation
+    as a Diffusion Process," arXiv:2111.11609.
+
+[7] M. Fiedler,
+    "Algebraic Connectivity of Graphs,"
+    Czechoslovak Mathematical Journal, 1973.
+
+[8] Fan Chung,
+    "The Heat Kernel as the PageRank of a Graph,"
+    arXiv:0711.0189.
+
+---
+# In development, ML Applications
+
+ML Model planned to added for efficient detections:
+1. Anomaly detection on market state ( isolation forest, an autoencoder's reconstruction error, or even a rolling Mahalanobis distance)
+2. Regime / fragmentation forecasting
+3. "Does this dislocation close?"
+4. Structure → forward-volatility study (a whole study and check so no need to see good stuffs)
+
+suggestion on data engineering
+
+The classic sample-size heuristic for a prediction model is EPV: ~10–20 events (minority-class instances) per feature (Peduzzi et al. 1996; tightened by Riley et al. 2019). If you use ~8 features (λ, λ₂, connectivity, strain, n_components + a couple of lags), you want on the order of 80–160 STRESSED/FRAGMENTING examples minimum just to not overfit
+
+The gold-standard, no-guessing method: gather a pilot, then train your model on 25% / 50% / 75% / 100% of it and plot validation score vs training size.
+
+Curve still rising steeply at 100% → you need more data.
+Curve flattened → you have enough.
+
+ticks are 0.5s apart and highly autocorrelated — λ₂ is persistent, that's the entire premise of the project. So 172,800 rows/day are nowhere near 172,800 independent samples. A STRESSED episode lasting 20s is 40 rows but ≈ one independent event.
+
+The deflation is real and estimable. For an AR(1)-ish series with autocorrelation ρ:
+$$n_{\text{eff}} \approx n \cdot \frac{1-\rho}{1+\rho}$$
+or more practically, n_eff ≈ (total seconds) / (decorrelation time τ). If regimes persist for ~minutes, a full day gives you maybe hundreds of independent episodes, not 173k. This is exactly why "just log a day, that's 173k rows, plenty!" is a trap — your effective n is 100–1000×smaller. Counting episodes (contiguous regime runs) instead of rows corrects for this automatically.
+
+
+| Wall-clock | Rows | Good for |
+|---|---|---|
+| 5 hours | ~36k | a taste; not enough rare events |
+| 2–3 days | ~350–520k | anomaly detection (#1) + structure study (#4)|
+| 1–2 weeks | ~1.2–2.4M | first real go at regime forecasting (#2) |
+| 1–3 months | 5M+ | robust #2 / cycle-closing (#3), ideally spanning a volatile event (a crash/rally) |
+
++ drop the first ~2 min of each session and any row with n_nodes below ~60.
++ Stick to stress_raw_within_h for study #4.4
++ Keep fiedler + n_components; drop connectivity and strain
++ lam_raw has real, live signal — median 6.1e-5, p90 1.8e-4, spikes to 4.5e-2. That spread + occasional spikes is exactly what you want to predict. Your training signal is alive.
+ 
+ALSO A LEARNING CURVE MIGHT BE A GOOD IDEA
+
+The training error increases as you increase the size of your dataset, because it becomes harder to fit a model that accounts for the increasing complexity/variability of your training set.
+
+The test error decreases as you increase the size of your dataset, because the model is able to generalise better from a higher amount of information.
+
+All the data will then sent and got trained in drive and by google colab, the data in the data folder is mainly for show, with .jsonl as the actual data, and meta.json is values that got used in the corressponding data
+
+Certain development are developed currently in Google Colab, if interested, you can send me access request:
+
+Anomaly Detection (unfinished): https://colab.research.google.com/drive/142Bw_B8CnhuNmOaVWGXIkuhPeRtyqpN6#scrollTo=nKwsRpCXzjGP
+
+For the Test cases, i already test those stuffs outside this repo, but i wanted to double check so they will be done in the near future
 ---
 
 ## How it works
@@ -14,73 +95,20 @@ Every tick, live order book data from multiple exchanges is assembled into a sin
 
 The point of building it this way: the same underlying question — *how efficiently does this market correct itself when something pushes it out of equilibrium* — turns out to answer three different practical questions depending on how you frame it. That reframing is the actual subject of this README.
 
-```mermaid
-flowchart TD
+![alt text](Graph.png)
 
-    A1["Binance<br/>WebSocket"]
-    A2["Coinbase Advanced<br/>API"]
-    A3["Kraken<br/>API"]
-    A1 & A2 & A3 --> M
+Interpretation:
 
-    M["Multi-Venue Aggregator<br/>Order Book Sync"]
-    M --> B
+- a live arbitrage-cycle scanner with realistic cost gating
 
-    subgraph B["1. Data Preprocessing"]
-        B1["Construct Multi-Venue Graph<br/>Node: asset x venue"]
-        B2["Log Transformation<br/>Wᵢⱼ = -ln(Aᵢⱼ)"]
-        B1 --> B2
-    end
+- a live market-structure/regime monitor.
 
-    B --> C
-    C --> D
-    C --> F
+Signals:
 
-    subgraph C["2. Market Structure Analysis"]
-        C1["Graph Laplacian<br/>L = D - A"]
-        C2["Spectral Gap λ₂<br/>Fiedler Value"]
-        C3["Tropical Min Cycle Mean<br/>< 0 ⇒ profitable cycle exists (gate)"]
-        C4["Strain<br/>Deviation from No-Arb Equilibrium"]
-        C1 --> C2
-        C1 --> C3
-        C2 --> C4
-    end
+- Tropical (max‑plus) eigenvalue λ: The maximum cycle mean of the ln(rate) weights = the best per‑hop log‑return any loop in the market offers. exp(λ) is the geometric-mean rate per hop. and can be interperted to be how mispriced the market is right now, Nonetheless, at 1 Hz this has ~zero autocorrelation and reverts faster than round-trip latency, so it is descriptive, not predictive. Don't read a spike as "go trade" — read it as "the market is dislocated this instant."
 
-    subgraph D["3. Spatial Graph Analysis"]
-        D1["Tarjan SCC<br/>Tradeable Subgraphs"]
-        D2["Spectral Embedding"]
-        D1 --> D2
-    end
-
-    subgraph F["5. Regime & Risk Engine"]
-        F1["Tropical eigenvalue λ<br/>arbitrage intensity"]
-        F2["Fiedler λ₂ + components<br/>connectivity / fragmentation"]
-        F3["Classify regime<br/>EFFICIENT / STRESSED / FRAGMENTING"]
-        F1 --> F3
-        F2 --> F3
-    end
-
-    D -->|SCC node-sets| E
-    F -->|regime context: arb is real in STRESSED,<br/>competed away in EFFICIENT| E
-
-    subgraph E["4. Arbitrage Detection — L3 → L1 round trip"]
-        E0["g.subgraph(SCC)<br/>shrink the adjacency"]
-        E1["Bellman-Ford in L1 DataProcessing<br/>Negative Cycle Detection"]
-        E2["Cost Filter<br/>Spread + Depth + Transfer Fees"]
-        E0 --> E1 --> E2
-    end
-
-    E --> G
-    F --> G
-    C --> G
-
-    G["Feature Store<br/>timestamped metrics + forward labels"]
-
-    G --> H1["Market Health<br/>Dashboard & Alerts"]
-    G --> H2["Regime Map<br/>per-pair classification"]
-    G --> H3["ML Model<br/>Trading Signal"]
-
-    H3 -.->|future| I["6. Execution Engine<br/>planned"]
-```
+- Fiedler value λ2: High → tightly coupled market; mispricing propagates and closes fast (healthy, well-arbitraged).
+Near 0 → the graph is barely holding together; deviations can persist. It's deliberately unweighted/from affinity/similarity matrix so that zero-cost same-asset transfer edges (weight −ln 1 = 0) don't spuriously split the market by venue.
 
 ---
 
@@ -128,12 +156,23 @@ Each tick is classified into one of three regimes:
 - **STRESSED** — still one connected market, but `λ` far above the fee: large dislocations are open (a fast move, one venue lagging, a volatility spike) while the graph is structurally intact;
 - **FRAGMENTING** — the graph has split into ≥ 2 components (or `λ₂ ≈ 0`): venues/assets decoupling, liquidity withdrawing. The top structural risk, so it overrides regardless of `λ`.
 
+to put it simply in arbitrage trading:
+- EFFICIENT → gaps too small, already competed away → noise
+- STRESSED → gap is real AND closes → trade
+- FRAGMENTING → gap is real but does NOT close (or can't execute) → trap
+
 `regime_engine.py` streams this live — a terminal readout plus a rolling 2-D regime map of connectivity vs arbitrage-intensity — and ships an offline `--demo` that classifies all three regimes with no feed. ADF/Monte-Carlo reversion features remain a possible future add-on, but only for connectivity, which has the persistence the arb intensity lacks.
 
 ![alt text](image.png)
 
 
 ![alt text](image-3.png)
+
+# just watch, save nothing:
+.venv/bin/python "L4_Regime&RiskEngine/regime_engine.py" --no-store
+
+# headless, no file either:
+.venv/bin/python "L4_Regime&RiskEngine/regime_engine.py" --headless --no-store
 
 ### Layer 6 — Execution Engine *(planned)*
 Async order routing and atomic cross-leg execution, built only on signals that have cleared the regime gate and the feature store's validation. Not the current focus.
@@ -188,18 +227,3 @@ The interesting part is where these three disagree. If the graph looks structura
 This is a research and feature-engineering tool, not an automated trading system. Detected cycles and regime classifications are logged for analysis, not executed. Live execution at retail scale competes against co-located, microsecond-latency infrastructure that this project has no intention of trying to beat — the value here is in the structural and statistical analysis, and in producing a defensible, testable dataset, not in chasing fleeting price gaps.
 
 ---
-
-## Papers/References
-
-Layer1
-https://beei.org/index.php/EEI/article/view/10817/4836 - An innovative approach to identifying triangular arbitrage opportunities in financial markets using the Bellman-Ford algorithm Issam Akouaouch, Anas Bouayad
-
-Layer 2
-https://math.uchicago.edu/~may/REU2012/REUPapers/JiangJ.pdf Jiaqi Jiang - An introduction to Spectral Graph Theory
-https://commons.lib.jmu.edu/cgi/viewcontent.cgi?article=1303&context=honors201019 Bradley A.Mason Tropical algebra, graph theory, and foreign exchange 
-
-Layer 3
-https://www.cs.cmu.edu/~cdm/resources/Tarjan1972-sccs.pdf - Tarjan SCC, DEPTH-FIRST SEARCH AND LINEAR GRAPH ALGORITHMS
-
-Layer 4
-https://arxiv.org/pdf/2111.11609 - Pricing cryptocurrencies : Modelling the ETHBTC spot-quotient variation as a diffusion process. Sidharth Mallik

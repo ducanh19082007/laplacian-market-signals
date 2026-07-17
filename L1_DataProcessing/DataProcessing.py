@@ -72,7 +72,7 @@ class ExchangeRateGraph:
         self,
         assets: List[str],
         transfer_cost: float = 0.0,
-        fee: float = 0.0,
+        fee=0.0,
         quote_window: Optional[float] = None,
         min_notional: Optional[Dict[str, float]] = None,
     ):
@@ -87,7 +87,15 @@ class ExchangeRateGraph:
         # == 0.1%). Without it the graph is frictionless and reports sub-fee
         # "arbitrage" that no real trade could ever capture.
         #technically, the weight would be Ln(Rn(1 - fee(%) ))
-        self.fee = fee 
+        #
+        # fee may be EITHER a scalar (uniform across venues) OR a dict keyed by broker
+        # name -- e.g. {"Binance": 0.001, "Coinbase Adv.": 0.006, "default": 0.001} --
+        # so cross-venue cycles accrue each venue's REAL asymmetric taker fee. Fees are
+        # static on the tick timescale, so this is a table set once, never fetched per
+        # edge in the loop. Crucially, the fee is applied to a SEPARATE net rate while
+        # each edge also keeps the fee-free `rate_raw`, so the fee stays a re-tunable
+        # OFFLINE knob instead of being baked irreversibly into the gathered data.
+        self.fee = fee
         
         # quote_window (seconds) bounds how far apart, in time, the quotes that
         # build a cycle may be. None disables the guard; see build_from_snapshot.
@@ -116,6 +124,18 @@ class ExchangeRateGraph:
         self.adjacency: Dict[Node, Dict[Node, dict]] = {} #the adjacent matrix, our output
 
 
+
+    def _fee_for(self, broker: str) -> float:
+        """
+        Taker fee for a convert leg on `broker`. `self.fee` is either a scalar (uniform)
+        or a dict keyed by broker name with an optional "default"; an unlisted venue
+        falls back to "default" then 0.0. Kept tiny and pure so it's cheap to call per
+        edge -- the table itself is loaded once, upstream.
+        """
+        fee = self.fee
+        if isinstance(fee, dict):
+            return fee.get(broker, fee.get("default", 0.0))
+        return fee or 0.0
 
     def _add_edge(self, src: Node, dst: Node, rate: float, **attrs) -> None:
         if rate is None or rate <= 0:
@@ -214,16 +234,23 @@ class ExchangeRateGraph:
                 base_node: Node = (base, broker)
                 quote_node: Node = (quote, broker)
 
-                # Each convert leg loses the taker fee, so you keep (1 - fee) of it.
-                keep = 1.0 - self.fee
+                # Each convert leg loses THIS venue's taker fee, so you keep (1 - fee_ij).
+                # `rate` is net-of-fee (what feeds Bellman-Ford / cycle_return, i.e. the
+                # EXECUTABLE view); `rate_raw` is the fee-free market rate and `fee` the
+                # rate actually applied -- stored so net λ / STRESSED can be re-derived
+                # offline under a different fee assumption without re-gathering.
+                fee_ij = self._fee_for(broker)
+                keep = 1.0 - fee_ij
                 # Sell BASE -> receive QUOTE at the bid (quote per base).
                 if bid is not None:
                     self._add_edge(base_node, quote_node, bid * keep,
-                                   kind="convert", pair=pair, broker=broker)
+                                   kind="convert", pair=pair, broker=broker,
+                                   rate_raw=bid, fee=fee_ij)
                 # Buy BASE with QUOTE -> pay the ask, so 1/ask base per quote.
                 if ask is not None:
                     self._add_edge(quote_node, base_node, (1.0 / ask) * keep,
-                                   kind="convert", pair=pair, broker=broker)
+                                   kind="convert", pair=pair, broker=broker,
+                                   rate_raw=1.0 / ask, fee=fee_ij)
 
                 if bid is not None or ask is not None:
                     brokers_per_asset.setdefault(base, set()).add(broker)
@@ -241,7 +268,11 @@ class ExchangeRateGraph:
                 for b in brokers:
                     if a == b:
                         continue
-                    self._add_edge((asset, a), (asset, b), rate, kind="transfer")
+                    # rate_raw=1.0: a transfer is fee-FREE structurally (same asset), so
+                    # it must not distort raw λ; the transfer_cost lives only in the net
+                    # `rate`, mirroring how convert edges split raw vs net.
+                    self._add_edge((asset, a), (asset, b), rate, kind="transfer",
+                                   rate_raw=1.0, fee=self.transfer_cost)
 
     def log_transform(self) -> "ExchangeRateGraph":
         """

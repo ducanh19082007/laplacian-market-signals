@@ -63,6 +63,7 @@ from L1_DataProcessing.MultiVenueFeed import build_default_feed
 from L1_DataProcessing.DataProcessing import ExchangeRateGraph
 from L2_MarketStructureAnalysis.TropicalEigenvalue import TropicalEigenvalue, fee_threshold
 from L2_MarketStructureAnalysis.GraphLaplacian import Laplacian
+from feature_store.store import FeatureStore
 
 
 # ===========================================================================
@@ -71,11 +72,10 @@ from L2_MarketStructureAnalysis.GraphLaplacian import Laplacian
 EFFICIENT = "EFFICIENT"
 STRESSED = "STRESSED"
 FRAGMENTING = "FRAGMENTING"
-WARMING = "WARMING"
 
-_ANSI = {EFFICIENT: "\033[92m", STRESSED: "\033[93m", FRAGMENTING: "\033[91m", WARMING: "\033[2m"}
+_ANSI = {EFFICIENT: "\033[92m", STRESSED: "\033[93m", FRAGMENTING: "\033[91m"}
 _RST = "\033[0m"
-_RGB = {EFFICIENT: "#2ca02c", STRESSED: "#ff7f0e", FRAGMENTING: "#d62728", WARMING: "#999999"}
+_RGB = {EFFICIENT: "#2ca02c", STRESSED: "#ff7f0e", FRAGMENTING: "#d62728"}
 
 
 # ===========================================================================
@@ -84,7 +84,8 @@ _RGB = {EFFICIENT: "#2ca02c", STRESSED: "#ff7f0e", FRAGMENTING: "#d62728", WARMI
 @dataclass
 class RegimeReading:
     t: float
-    lam: float            # tropical eigenvalue: arb intensity (per-hop log-return); NaN if no cycle
+    lam: float            # tropical eigenvalue on NET (fee'd) rates: executable arb intensity; NaN if no cycle
+    lam_raw: float        # tropical eigenvalue on RAW (fee-free) rates: fee-independent arb intensity; NaN if none
     fiedler: float        # Fiedler value lambda_2: algebraic connectivity (0 if graph split)
     connectivity: float   # smallest NON-zero Laplacian eigenvalue (tightness of the connected part)
     strain: float         # 1/lambda_2 (inf if split)
@@ -137,19 +138,25 @@ def classify(lam: float, n_components: int, fiedler: float, tau: float,
 def read_regime(g, fee: float, t: float = 0.0, *, stress_mult: float = 5.0) -> RegimeReading:
     """One graph -> its regime reading (both spectra + label)."""
     tau = fee_threshold(fee)
-    res = TropicalEigenvalue(g).compute()
+    res = TropicalEigenvalue(g).compute()                   # NET rates: executable intensity
     lam = float(res.eigenvalue)
     if not np.isfinite(lam):
         lam = np.nan                                        # no cycle => no arbitrage
+    # Fee-FREE intensity off the same structure. This is what regime labelling keys off
+    # (label.py), so accurate/higher fees shrink `lam` (executability) WITHOUT starving
+    # the STRESSED class, which is defined on lam_raw vs its own rolling baseline.
+    lam_raw = float(TropicalEigenvalue(g, rate_attr="rate_raw").compute().eigenvalue)
+    if not np.isfinite(lam_raw):
+        lam_raw = np.nan
     fiedler, connectivity, n_comp, n_nodes = spectral_read(g)
     strain = (1.0 / fiedler) if (np.isfinite(fiedler) and fiedler > 1e-12) else np.inf
     regime = classify(lam, n_comp, fiedler, tau, stress_mult=stress_mult)
     top = ""
     if getattr(res, "has_cycle", False) and getattr(res, "cycle", None):
         top = " -> ".join(ExchangeRateGraph.fmt(x) for x in res.cycle)
-    return RegimeReading(t=t, lam=lam, fiedler=fiedler, connectivity=connectivity,
-                         strain=strain, n_components=n_comp, n_nodes=n_nodes,
-                         regime=regime, top_loop=top)
+    return RegimeReading(t=t, lam=lam, lam_raw=lam_raw, fiedler=fiedler,
+                         connectivity=connectivity, strain=strain, n_components=n_comp,
+                         n_nodes=n_nodes, regime=regime, top_loop=top)
 
 
 # ===========================================================================
@@ -173,12 +180,33 @@ def _fmt(x: float, nd: int = 4) -> str:
     return f"{x:.{nd}f}" if np.isfinite(x) else ("inf" if x == np.inf else "n/a")
 
 
+def detect_cycles(g, min_profit: float = 0.0) -> list:
+    """
+    L3 arbitrage detection -> list of {path, ret, profit_pct}, net-profit filtered.
+
+    Lazy import of L3 so `--demo` (which never detects) still runs without the compiled
+    tarjan_arb extension. find_all_arbitrage returns one (cycle, return) per SCC that
+    holds a loop; we keep those clearing min_profit after the graph's built-in fee.
+    """
+    from L3_TarjanSCC.TarjanSCC import find_all_arbitrage
+    out = []
+    for cycle, ret in find_all_arbitrage(g):
+        if not cycle or (ret - 1.0) <= min_profit:
+            continue
+        out.append({
+            "path": [ExchangeRateGraph.fmt(n) for n in cycle],
+            "ret": float(ret),
+            "profit_pct": float((ret - 1.0) * 100.0),
+        })
+    return out
+
+
 # ===========================================================================
 # The one sampler: build graph -> two spectra -> regime -> (optionally) table
 # ===========================================================================
-def sampler_loop(feed, state: RegimeState, args, render_table: bool) -> None:
+def sampler_loop(feed, state: RegimeState, args, render_table: bool, store=None) -> None:
     tau = fee_threshold(args.fee)
-    while not state.stop.is_set():
+    while not state.stop.is_set():  
         now = time.monotonic()
         g = feed.build_graph()
         if g is None:
@@ -188,6 +216,26 @@ def sampler_loop(feed, state: RegimeState, args, render_table: bool) -> None:
         if r.n_nodes < 2:                       # graph still warming / too small to score
             time.sleep(args.interval)
             continue
+
+        # L3 detection -> arbitrage cycles, TAGGED with THIS tick's regime rather than
+        # dropping the non-STRESSED ones (improvement C): EFFICIENT cycles are the
+        # negative examples ML needs, so they are context to keep, not noise to delete.
+        cycles = detect_cycles(g, getattr(args, "min_profit", 0.0))
+
+        if store is not None:                   # improvement B: one JSONL row per tick
+            store.append({
+                "ts": time.time(),              # absolute wall clock -> concat sessions + forward labels
+                "t": r.t,                       # seconds since this run started
+                "regime": r.regime,             # live LABEL (net-of-fee); dashboard convenience only
+                "lam": r.lam,                   # NET arb intensity (per-hop log-return); null when NaN
+                "lam_raw": r.lam_raw,           # FEE-FREE arb intensity -> label STRESSED off THIS offline
+                "fiedler": r.fiedler,
+                "connectivity": r.connectivity,
+                "strain": r.strain,             # inf -> null
+                "n_components": r.n_components,
+                "n_nodes": r.n_nodes,
+                "cycles": cycles,
+            })
 
         state.times.append(r.t)
         state.lams.append(r.lam)
@@ -215,11 +263,19 @@ def sampler_loop(feed, state: RegimeState, args, render_table: bool) -> None:
                 f"  arb intensity  : lambda  = {_fmt(r.lam * 100)}%/hop  (stress> {tau*args.stress_mult*100:.4f}%)",
                 f"  connectivity   : lambda2 = {_fmt(r.fiedler)}   strain = {_fmt(r.strain, 1)}",
                 f"  graph          : {r.n_nodes} nodes / {r.n_components} component(s)",
-                "-" * 20, "REGIME CHANGES:"] + (list(state.log) or ["(none yet)"])
+                "-" * 20, f"ARB CYCLES [{r.regime}]:"]
+            if cycles:
+                right += [f"  {c['profit_pct']:+.4f}%  " + " -> ".join(c["path"]) for c in cycles[:6]]
+                if len(cycles) > 6:
+                    right.append(f"  (+{len(cycles) - 6} more)")
+            else:
+                right.append("  (none this tick)")
+            right += ["-" * 20, "REGIME CHANGES:"] + (list(state.log) or ["(none yet)"])
             print(feed._render_side_by_side(feed._exchange_rate_box(16), right))
         elif not getattr(args, "headless_quiet", False):
             print(f"[{time.strftime('%H:%M:%S')}] {r.regime:11s}  lambda={_fmt(r.lam * 100)}%/hop  "
-                  f"lambda2={_fmt(r.fiedler)}  strain={_fmt(r.strain, 1)}  comps={r.n_components}",
+                  f"lambda2={_fmt(r.fiedler)}  strain={_fmt(r.strain, 1)}  comps={r.n_components}  "
+                  f"cycles={len(cycles)}",
                   flush=True)
 
         if args.seconds and (now - state.t0) >= args.seconds:
@@ -398,7 +454,9 @@ def main() -> None:
     ap.add_argument("--stress-mult", type=float, default=5.0,
                     help="STRESSED when arb intensity lambda > this * tau")
     # feed regime knobs -- same anti-phantom defaults as the rest of L4/L1.
-    ap.add_argument("--feed-fee", type=float, default=0.00015, help="per-leg taker fee in graph edges")
+    ap.add_argument("--feed-fee", type=float, default=None,
+                    help="UNIFORM per-leg taker fee override for the graph edges; "
+                         "default (unset) uses the realistic per-venue DEFAULT_FEE_TABLE")
     ap.add_argument("--quote-window", type=float, default=0.2, help="max seconds apart cycle legs may be")
     ap.add_argument("--max-quote-age", type=float, default=1.0, help="drop quotes older than this")
     ap.add_argument("--no-depth-filter", action="store_true", help="disable the min-notional depth filter")
@@ -410,6 +468,12 @@ def main() -> None:
     ap.add_argument("--headless", action="store_true", help="no popup; sample + print regime")
     ap.add_argument("--seconds", type=float, default=0.0, help="auto-stop after N seconds")
     ap.add_argument("--demo", action="store_true", help="offline classifier demo (no feed) and exit")
+    # feature store (improvement B): per-tick JSONL log for offline ML.
+    ap.add_argument("--min-profit", type=float, default=0.0,
+                    help="log/show only cycles clearing this net return (after the graph fee)")
+    ap.add_argument("--no-store", action="store_true", help="do NOT write the feature-store JSONL log")
+    ap.add_argument("--store-path", default=None,
+                    help="feature-store JSONL path (default: data/regime_<timestamp>.jsonl)")
     args = ap.parse_args()
     args.headless_quiet = False
 
@@ -429,8 +493,9 @@ def main() -> None:
         print("no display detected -- falling back to --headless.")
         args.headless = True
 
-    feed_kwargs = dict(fee=args.feed_fee, max_quote_age=args.max_quote_age,
-                       quote_window=args.quote_window)
+    feed_kwargs = dict(max_quote_age=args.max_quote_age, quote_window=args.quote_window)
+    if args.feed_fee is not None:                # else build_default_feed uses the per-venue table
+        feed_kwargs["fee"] = args.feed_fee
     if args.no_depth_filter:
         feed_kwargs["min_notional"] = None
     feed = build_default_feed(**feed_kwargs)
@@ -439,9 +504,31 @@ def main() -> None:
           f"quote_window={args.quote_window}s  depth_filter={'OFF' if args.no_depth_filter else 'on'}",
           flush=True)
 
+    store = None if args.no_store else FeatureStore(args.store_path)
+    if store is not None:
+        # Record the cost/feed assumptions next to the data so fees stay an OFFLINE knob:
+        # lam_raw in the rows is fee-free, this sidecar says which fees would apply.
+        store.write_meta({
+            "created": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "fee_table": feed.fee,               # scalar or per-venue dict actually used
+            "transfer_cost": feed.transfer_cost,
+            "quote_window": feed.quote_window,
+            "max_quote_age": args.max_quote_age,
+            "min_notional": feed.min_notional,
+            "regime_fee": args.fee,              # tau used by the LIVE classifier (dashboard only)
+            "stress_mult": args.stress_mult,
+            "interval": args.interval,
+            "n_assets": len(feed.assets or []),
+            "venues": [b.name for b, _ in feed.dashboards],
+            "note": "lam = net-of-fee (executable) arb intensity; lam_raw = fee-free. "
+                    "Label STRESSED off lam_raw (see feature_store/label.py --stress-quantile).",
+        })
+        print(f"[feature store] logging every tick -> {store.path}", flush=True)
+
     state = RegimeState()
     render_table = (not args.no_feed_view) and (not args.headless)
-    sampler = threading.Thread(target=sampler_loop, args=(feed, state, args, render_table), daemon=True)
+    sampler = threading.Thread(target=sampler_loop,
+                               args=(feed, state, args, render_table, store), daemon=True)
     sampler.start()
 
     try:
@@ -458,6 +545,9 @@ def main() -> None:
         for _, dashboard in feed.dashboards:
             dashboard.is_running = False
         time.sleep(0.2)
+        if store is not None:
+            store.close()
+            print(f"[feature store] wrote {store.rows} rows -> {store.path}")
 
 
 if __name__ == "__main__":

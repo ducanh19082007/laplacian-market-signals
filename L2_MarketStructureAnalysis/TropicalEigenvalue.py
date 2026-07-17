@@ -10,12 +10,11 @@
 #   loop in the market offers -- the "top loop return rate" -- and its exp() is the
 #   geometric-mean rate per hop.
 #
-#   Relationship to L2's OTHER tropical number (the README / Engine gate):
-#       the engine's Structure.min_cycle_mean is the MIN-PLUS eigenvalue of the
-#       -ln(rate) weights, and
+#   Relationship to L2's OTHER tropical number (the min-cycle-mean gate):
+#       the min-plus eigenvalue of the -ln(rate) weights, where
 #           min_cyclemean(-ln rate) = -( max_cyclemean(+ln rate) ) = -eigenvalue.
-#       So this file's `eigenvalue` and the engine gate are the same object read
-#       with opposite sign; .min_cycle_mean() below hands the engine its version.
+#       So this file's `eigenvalue` and that gate value are the same object read
+#       with opposite sign; .min_cycle_mean() below returns that version.
 #
 #   Why per-SCC: a cycle lives ENTIRELY inside one strongly-connected component
 #   (L3's whole premise), so the max cycle mean over the graph is the max over the
@@ -23,8 +22,8 @@
 #   Karp's maximum-cycle-mean DP on each non-trivial SCC -- and take the max.
 #
 #   This module is the profit-space, max-cycle-mean sibling of GraphLaplacian.py; it
-#   feeds L4's OU arbitrage predictor (L4_Regime&RiskEngine/OUArbitrage.py), which
-#   models the eigenvalue time-series as a mean-reverting process.
+#   feeds L4's regime & risk engine (L4_Regime&RiskEngine/regime_engine.py), which
+#   reads the eigenvalue each tick as the market's arbitrage intensity.
 #
 # Author: Anh Duc Le
 
@@ -94,8 +93,14 @@ class TropicalEigenvalue:
     directly and log it ourselves, so log_transform() need NOT have run.)
     """
 
-    def __init__(self, graph: "ExchangeRateGraph") -> None:
+    def __init__(self, graph: "ExchangeRateGraph", rate_attr: str = "rate") -> None:
         self.graph = graph
+        # rate_attr picks WHICH rate the eigenvalue is computed from:
+        #   "rate"     -> net-of-fee (the executable view; matches the old behaviour)
+        #   "rate_raw" -> fee-FREE market rate -> a fee-INDEPENDENT arb intensity, which
+        #                 is what L4 logs as `lam_raw` and what regime labelling keys off
+        #                 (so realistic fees can't starve the STRESSED class).
+        self.rate_attr = rate_attr
 
         # STEP 1: freeze node ordering (dict keys -> integer ids), same as Laplacian.
         self.nodes: List[Node] = graph.nodes()
@@ -105,7 +110,9 @@ class TropicalEigenvalue:
         # Weighted adjacency in profit space: adj[u] = [(v, ln(rate_uv)), ...].
         self.adj: List[List[Tuple[int, float]]] = [[] for _ in range(self.n)]
         for u, v, a in graph.edges():
-            rate = a.get("rate")
+            rate = a.get(rate_attr)
+            if rate is None:                 # older graph w/o rate_raw -> fall back to net
+                rate = a.get("rate")
             if rate is None or rate <= 0:
                 continue
             self.adj[self.index[u]].append((self.index[v], math.log(rate)))

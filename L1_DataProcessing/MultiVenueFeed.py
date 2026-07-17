@@ -384,11 +384,27 @@ class MultiBrokerOrderBook:
 
 
 _KEEP_DEFAULT_NOTIONAL = object()   # sentinel: "use the built-in MIN_NOTIONAL"
+_KEEP_DEFAULT_FEE = object()        # sentinel: "use the built-in per-venue DEFAULT_FEE_TABLE"
+
+# Per-venue SPOT TAKER fees (fraction), keyed by BrokerConfig.name. These are the
+# published standard/low-tier retail rates -- edit to YOUR actual VIP tier. Fees are
+# static on the tick timescale, so they live in a table loaded ONCE here, never fetched
+# per-edge in the sampling loop (that would only add latency + rate-limit failures to
+# the gather for a number that changes ~monthly). "default" covers any unlisted venue.
+DEFAULT_FEE_TABLE = {
+    "Binance": 0.0010,
+    "Coinbase Adv.": 0.0060,
+    "Kraken": 0.0026,
+    "OKX": 0.0010,
+    "Gemini": 0.0040,
+    "Bitstamp": 0.0030,
+    "default": 0.0010,
+}
 
 
 def build_default_feed(
     refresh_interval: float = 0.01,
-    fee: float = 0.00015,
+    fee=_KEEP_DEFAULT_FEE,
     max_quote_age: float = 1.0,
     quote_window: float = 0.2,
     min_notional=_KEEP_DEFAULT_NOTIONAL,
@@ -581,6 +597,12 @@ def build_default_feed(
     # up), or pass a dict to tighten/loosen it. Default keeps the built-in thresholds.
     if min_notional is not _KEEP_DEFAULT_NOTIONAL:
         MIN_NOTIONAL = min_notional
+
+    # Default to the realistic per-venue table; a caller can still pass a scalar (uniform
+    # fee, e.g. --feed-fee) or their own dict. The graph stores rate_raw alongside, so
+    # whichever fee is used here stays a re-tunable offline knob, not baked-in truth.
+    if fee is _KEEP_DEFAULT_FEE:
+        fee = DEFAULT_FEE_TABLE
 
     #for this test run, i will deliberately picked the fee, transaction fee, and nominal min to
     #be a bit naive to see how it run. those variables also is not detailed enough
