@@ -95,7 +95,7 @@ Every tick, live order book data from multiple exchanges is assembled into a sin
 
 The point of building it this way: the same underlying question — *how efficiently does this market correct itself when something pushes it out of equilibrium* — turns out to answer three different practical questions depending on how you frame it. That reframing is the actual subject of this README.
 
-![alt text](Graph.png)
+![alt text](Graph.jpg)
 
 Interpretation:
 
