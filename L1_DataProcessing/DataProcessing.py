@@ -72,7 +72,7 @@ class ExchangeRateGraph:
         self,
         assets: List[str],
         transfer_cost: float = 0.0,
-        fee=0.0,
+        fee: float|dict=0.0,
         quote_window: Optional[float] = None,
         min_notional: Optional[Dict[str, float]] = None,
     ):

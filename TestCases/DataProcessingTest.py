@@ -28,9 +28,6 @@ from L1_DataProcessing.DataProcessing import (
 )
 
 
-# --------------------------------------------------------------------------- #
-# module-level helpers                                                        #
-# --------------------------------------------------------------------------- #
 class TestSplitPair:
     def test_basic_split(self):
         assert split_pair("ethbtc", ["btc", "eth", "xrp"]) == ("eth", "btc")
@@ -120,9 +117,6 @@ class TestFeeFor:
         assert ExchangeRateGraph([], fee=0.0)._fee_for("X") == 0.0
 
 
-# --------------------------------------------------------------------------- #
-# _add_edge                                                                   #
-# --------------------------------------------------------------------------- #
 class TestAddEdge:
     def test_valid_edge_registers_both_nodes(self):
         g = ExchangeRateGraph(["btc", "eth"])
@@ -138,11 +132,76 @@ class TestAddEdge:
         g = ExchangeRateGraph(["btc", "eth"])
         g._add_edge(("eth", "X"), ("btc", "X"), bad_rate)
         assert g.adjacency == {}
+        
+    
+    def test_add_edge_overwrites_existing_edge(self):
+        g = ExchangeRateGraph(["btc", "eth"])
+        a, b = ("eth", "X"), ("btc", "X")
+        
+        # First insertion
+        g._add_edge(a, b, 1.5, kind="convert")
+        # Overwrite insertion
+        g._add_edge(a, b, 2.0, kind="direct")
+        
+        assert g.adjacency[a][b]["rate"] == 2.0
+        assert g.adjacency[a][b]["kind"] == "direct"
+    def test_self_loop_edge_handling(self):
+        g = ExchangeRateGraph(["btc"])
+        a = ("btc", "X")
+        
+        # Testing how the graph handles a node mapping to itself
+        g._add_edge(a, a, 1.0, kind="identity")
+        
+        assert a in g.adjacency
+        assert g.adjacency[a][a]["rate"] == 1.0
+        
+    
+    def test_transfer_edges_creates_full_clique_minus_self(self):
+        g = ExchangeRateGraph([])
+        g.transfer_cost = 0.01
+        
+        # 4 brokers for 1 asset means 4 * 3 = 12 directed edges
+        brokers_data = {"btc": {"binance", "coinbase", "kraken", "okx"}}
+        g._add_transfer_edges(brokers_data)
+        
+        expected_rate = 1.0 - g.transfer_cost
+        total_edges = 0
+        
+        for u in g.adjacency:
+            for v in g.adjacency[u]:
+                total_edges += 1
+                assert u != v  # No self loops
+                assert u[0] == v[0] == "btc"  # Asset remains identical
+                assert g.adjacency[u][v]["rate"] == expected_rate
+                assert g.adjacency[u][v]["rate_raw"] == 1.0
+                assert g.adjacency[u][v]["fee"] == g.transfer_cost
+                assert g.adjacency[u][v]["kind"] == "transfer"
+                
+        assert total_edges == 12
+
+    def test_transfer_edges_remains_strictly_siloed_per_asset(self):
+        g = ExchangeRateGraph([])
+        g.transfer_cost = 0.002
+        
+        brokers_data = {
+            "btc": {"binance", "coinbase"},
+            "eth": {"coinbase", "kraken"}
+        }
+        
+        g._add_transfer_edges(brokers_data)
+        
+        # Verify cross-asset edges do not exist
+        # coinbase has both btc and eth, but they must never map to each other
+        btc_coinbase = ("btc", "coinbase")
+        eth_coinbase = ("eth", "coinbase")
+        
+        if btc_coinbase in g.adjacency:
+            assert eth_coinbase not in g.adjacency[btc_coinbase]
+            
+        if eth_coinbase in g.adjacency:
+            assert btc_coinbase not in g.adjacency[eth_coinbase]
 
 
-# --------------------------------------------------------------------------- #
-# build_from_snapshot -- the core reshaping                                   #
-# --------------------------------------------------------------------------- #
 class TestBuildFromSnapshot:
     def test_single_pair_two_directions_no_fee(self):
         g = ExchangeRateGraph(["btc", "eth"])
@@ -266,11 +325,64 @@ class TestBuildFromSnapshot:
         g.build_from_snapshot(snap)
         g.build_from_snapshot(snap)
         assert len(g.edges()) == 2
+        
+        
+    def test_snapshot_builds_correct_bid_ask_edges(self):
+        assets = ["btc", "eth", "xrp", "sol"]
+        snapshot = {
+            "ethbtc": {
+                "Binance": {"bid": "0.0610", "ask": "0.0611"},
+                "Kraken":  {"bid": "0.0600", "ask": "0.0601"},
+            },
+            "xrpbtc": {
+                "Binance": {"bid": "0.00001200", "ask": "0.00001201"},
+            },
+            "xrpeth": {
+                "Binance": {"bid": "0.00019600", "ask": "0.00019650"},
+            },
+        }
+        
+        g = ExchangeRateGraph(assets)
+        g.build_from_snapshot(snapshot)
+        
+        # Verify directional rates for eth <-> btc on Binance
+        eth_binance = ("eth", "Binance")
+        btc_binance = ("btc", "Binance")
+        
+        # Selling ETH for BTC (Bid) -> rate is 0.0610
+        assert g.adjacency[eth_binance][btc_binance]["rate"] == 0.0610
+        # Buying ETH with BTC (Ask) -> rate is 1 / 0.0611
+        assert g.adjacency[btc_binance][eth_binance]["rate"] == pytest.approx(1.0 / 0.0611)
 
+    def test_quote_window_drops_stale_timestamps(self):
+        assets = ["btc", "eth", "xrp", "sol"]
+        snapshot1 = {
+            "ethbtc": {
+                "Binance": {"bid": "0.0610", "ask": "0.0611", "ts": 1000.0},
+                "Kraken": {"bid": "0.0600", "ask": "0.0601", "ts": 1000.676767},
+            },
+            "xrpbtc": {
+                "Binance": {"bid": "0.00001200", "ask": "0.00001201", "ts": 1000.0},
+            },
+            "xrpeth": {
+                "Binance": {"bid": "0.00019600", "ask": "0.00019650", "ts": 1000.0},
+            },
+        }
 
-# --------------------------------------------------------------------------- #
-# log_transform                                                               #
-# --------------------------------------------------------------------------- #
+        # Max timestamp is 1000.676767 (Kraken). Window is 0.1.
+        # Anything older than 1000.576767 (like Binance at 1000.0) must be discarded.
+        g = ExchangeRateGraph(assets, transfer_cost=0.0, quote_window=0.1)
+        g.build_from_snapshot(snapshot1)
+
+        # Kraken should survive
+        assert ("eth", "Kraken") in g.adjacency
+        
+        # Binance pairs should be completely pruned/absent due to staleness
+        assert ("eth", "Binance") not in g.adjacency
+        assert ("xrp", "Binance") not in g.adjacency
+
+class TestAddTransferEdges
+
 class TestLogTransform:
     def test_weight_is_negative_log_rate(self):
         g = ExchangeRateGraph(["btc", "eth"])
@@ -297,10 +409,6 @@ class TestLogTransform:
         loop_weight = g.adjacency[a][b]["weight"] + g.adjacency[b][a]["weight"]
         assert loop_weight < 0
 
-
-# --------------------------------------------------------------------------- #
-# graph-theory helpers                                                        #
-# --------------------------------------------------------------------------- #
 class TestGraphHelpers:
     def _triangle(self):
         g = ExchangeRateGraph(["btc", "eth", "sol"])

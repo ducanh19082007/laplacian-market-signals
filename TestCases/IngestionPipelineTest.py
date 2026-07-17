@@ -45,15 +45,12 @@ def _dash(pairs=("ethbtc",), **kw):
     return OrderBookDashboard(list(pairs), "mock:test", **kw)
 
 
-# =========================================================================== #
-# 1. PURE TRANSFORM HALF  (active, deterministic)                             #
-# =========================================================================== #
 class TestNormalizeSymbol:
     def test_strips_punctuation_and_lowercases(self):
         d = _dash()
         assert d._normalize_symbol("ETH/BTC") == "ethbtc"
         assert d._normalize_symbol("BTC-USDT") == "btcusdt"
-        assert d._normalize_symbol("  Sol_USD ") == "solusd"
+        assert d._normalize_symbol("  Sol_USD           ") == "solusd"
 
     def test_none_and_non_string(self):
         d = _dash()
@@ -121,9 +118,6 @@ class TestDefaultPayloadExtractor:
         assert _dash()._default_payload_extractor({"data": "not-a-dict"}) is None
 
 
-# =========================================================================== #
-# 1b. READ SIDE  (exact-match + staleness -- the anti-phantom-arb guards)     #
-# =========================================================================== #
 class TestReadSide:
     def _fresh(self, max_quote_age=None):
         d = _dash(["ethbtc"], max_quote_age=max_quote_age)
@@ -157,9 +151,7 @@ class TestReadSide:
         assert d.get_best_prices("ethbtc") == (0.06, 0.061)
 
 
-# =========================================================================== #
-# 2. LIVE DATAFLOW HALF  --  HOW TO TEST THE API-CALL PATH  (notes)           #
-# =========================================================================== #
+# 2. LIVE DATAFLOW HALF  --  HOW TO TEST THE API-CALL PATH  (notes)           
 #
 # The path is:  run() -> Thread(_start_async_loop) -> _listen():
 #

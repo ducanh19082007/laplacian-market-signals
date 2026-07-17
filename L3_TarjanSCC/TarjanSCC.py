@@ -58,6 +58,22 @@ from L1_DataProcessing.DataProcessing import ExchangeRateGraph
 Node = Tuple[str, str]
 
 
+def scc_components(
+    num_nodes: int, edges: List[Tuple[int, int, float]]
+) -> Tuple[List[int], int]:
+    """
+    Tarjan SCC only (no Bellman-Ford), straight from the C++ module.
+
+    This is the low-level, id-space entry point: `edges` are (u_id, v_id, weight)
+    tuples in the CALLER's own node ordering (weight is ignored -- SCC is pure
+    structure), ids 0..num_nodes-1. Returns (comp, num_sccs) where comp[i] is
+    node i's SCC id. L2's TropicalEigenvalue calls this so the whole codebase
+    shares this one Tarjan instead of keeping a second copy in Python.
+    """
+    comp, num_sccs = tarjan_arb.scc_components(num_nodes, edges)
+    return comp, num_sccs
+
+
 def find_all_arbitrage(graph: ExchangeRateGraph) -> List[Tuple[List[Node], float]]:
     """
     Find one arbitrage cycle per strongly-connected component, via the C++ module.

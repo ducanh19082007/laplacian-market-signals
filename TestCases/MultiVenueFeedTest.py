@@ -40,7 +40,6 @@ from L1_DataProcessing.MultiVenueFeed import (
 
 # --------------------------------------------------------------------------- #
 # a fake OrderBookDashboard so we can drive snapshot()/aggregate() offline     #
-# --------------------------------------------------------------------------- #
 class _FakeDashboard:
     """
     Minimal stand-in exposing only the three methods MultiBrokerOrderBook calls:
@@ -70,9 +69,6 @@ def _mbob_with_fakes(dashboards):
     return mbob
 
 
-# --------------------------------------------------------------------------- #
-# _cycle_signature -- rotation-invariant de-dup key (pure, static)            #
-# --------------------------------------------------------------------------- #
 class TestCycleSignature:
     A, B, C = ("btc", "X"), ("eth", "X"), ("sol", "X")   # sorted: A < B < C
 

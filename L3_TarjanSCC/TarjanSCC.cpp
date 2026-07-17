@@ -21,6 +21,7 @@
 
 #include <vector>
 #include <tuple>
+#include <utility>
 #include <algorithm>
 
 namespace py = pybind11;
@@ -255,9 +256,31 @@ std::vector<std::vector<int>> find_all_arbitrage(
         if (!cyc.empty()) cycles.push_back(std::move(cyc)); 
         // we want to transfer it right away to optimize everything (im pretti greedi u know?)
     }
-    //finallly this is the steps that goes through every SCCs 
+    //finallly this is the steps that goes through every SCCs
     // found and then perform ballman_ford_adj
     return cycles;
+}
+
+// SCC-only public entry point. Same integer-edge contract as find_all_arbitrage
+// (edges = [(u, v, weight), ...] in the caller's own id space, 0..num_nodes-1),
+// but it STOPS after Tarjan and hands back the raw component labelling instead of
+// running Bellman-Ford. This is what lets L2's TropicalEigenvalue reuse THIS
+// Tarjan -- so the whole codebase shares one SCC implementation (this C++ one)
+// rather than keeping a second copy in Python. The `weight` field is ignored here
+// (SCC is pure structure); we accept it only to keep one edge format everywhere.
+// Returns (comp, num_sccs): comp[node_id] is that node's SCC id in [0, num_sccs).
+std::pair<std::vector<int>, int> scc_components(
+        int num_nodes,
+        const std::vector<std::tuple<int, int, double>>& edges) {
+
+    std::vector<std::vector<Edge>> adj(num_nodes);
+    for (const auto& [u, v, w] : edges) {
+        adj[u].push_back({v, w});
+    }
+
+    int num_sccs = 0;
+    std::vector<int> comp = tarjan_scc(num_nodes, adj, num_sccs);
+    return {comp, num_sccs};
 }
 
 // for this part, we decided the "custom library of TarjanSCC + Bellman-Ford algorithms on negative
@@ -268,9 +291,14 @@ std::vector<std::vector<int>> find_all_arbitrage(
 PYBIND11_MODULE(tarjan_arb, m) {
     m.doc() = "L3: Tarjan SCC + per-component Bellman-Ford loop arbitrage search";
     m.def("find_all_arbitrage", &find_all_arbitrage, // name of the function we have in
-        //the custom library we made with certain py:: arguments we had before 
+        //the custom library we made with certain py:: arguments we had before
         // py:: is actually pybind11:: but we changed it name
           py::arg("num_nodes"), py::arg("edges"),
           "Return one closed arbitrage cycle (node-id path) per SCC that holds one.");
+
+    // SCC-only entry point so L2 (TropicalEigenvalue) reuses this same Tarjan.
+    m.def("scc_components", &scc_components,
+          py::arg("num_nodes"), py::arg("edges"),
+          "Return (comp, num_sccs): Tarjan SCC id per node id. No Bellman-Ford.");
 }
 

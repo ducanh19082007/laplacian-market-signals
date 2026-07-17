@@ -18,8 +18,9 @@
 #
 #   Why per-SCC: a cycle lives ENTIRELY inside one strongly-connected component
 #   (L3's whole premise), so the max cycle mean over the graph is the max over the
-#   per-SCC max cycle means. We reuse that decomposition here -- Tarjan first, then
-#   Karp's maximum-cycle-mean DP on each non-trivial SCC -- and take the max.
+#   per-SCC max cycle means. We reuse that decomposition here -- L3's own compiled
+#   Tarjan (TarjanSCC.scc_components) first, then Karp's maximum-cycle-mean DP on
+#   each non-trivial SCC -- and take the max.
 #
 #   This module is the profit-space, max-cycle-mean sibling of GraphLaplacian.py; it
 #   feeds L4's regime & risk engine (L4_Regime&RiskEngine/regime_engine.py), which
@@ -42,6 +43,13 @@ try:
     from ..L1_DataProcessing.DataProcessing import ExchangeRateGraph, Node
 except ImportError:
     from L1_DataProcessing.DataProcessing import ExchangeRateGraph, Node
+
+# The SCC decomposition is L3's compiled C++ Tarjan -- the ONE Tarjan the whole
+# codebase shares -- not a second copy transcribed into Python.
+try:
+    from ..L3_TarjanSCC.TarjanSCC import scc_components
+except ImportError:
+    from L3_TarjanSCC.TarjanSCC import scc_components
 
 NEG_INF = float("-inf")
 
@@ -81,12 +89,16 @@ class TropicalEigenvalue:
     """
     Max-plus eigenvalue (maximum cycle mean) of an ExchangeRateGraph.
 
-    Pipeline mirrors L3's split but stays in pure Python so L2 has no dependency on
-    the compiled .so:
+    Pipeline mirrors L3's split and REUSES L3's SCC so the whole codebase has one
+    Tarjan (the compiled C++ one); only Karp's DP is Python here:
         1. freeze a node ordering (dict -> integer ids), like GraphLaplacian does,
-        2. iterative Tarjan SCC (same logic as TarjanSCC.cpp, transcribed to Python),
+        2. Tarjan SCC via L3's compiled module (TarjanSCC.scc_components) -- the
+           same C++ Tarjan L1/L4's detection path uses, not a private copy,
         3. Karp's maximum-cycle-mean DP on each non-trivial SCC,
         4. eigenvalue = max over SCCs; keep the winning loop.
+
+    Note: this makes L2 depend on L3's built .so (as L1 and L4 already do). Build
+    it with:  cd L3_TarjanSCC && python setup.py build_ext --inplace
 
     Edge weights are w_ij = ln(rate_ij) -- PROFIT space, so a bigger cycle mean is a
     better loop. (L1 stores -ln(rate) in edge["weight"]; we read edge["rate"]
@@ -123,65 +135,16 @@ class TropicalEigenvalue:
     # ------------------------------------------------------------------ Tarjan
     def sccs(self) -> Tuple[List[int], int]:
         """
-        Iterative Tarjan SCC. Direct Python transcription of TarjanSCC.cpp: an
-        explicit work stack replaces recursion so a deep graph can't blow the stack.
-        Returns (comp, num_sccs) where comp[node_id] is that node's SCC id.
+        Strongly-connected components, via L3's compiled C++ Tarjan
+        (TarjanSCC.scc_components). Returns (comp, num_sccs) where comp[node_id]
+        is that node's SCC id.
+
+        We flatten our own integer adjacency (self.adj) back to (u, v, weight)
+        edges in our own id space and hand them to the C++; the weight rides along
+        unused (SCC is pure structure), reusing L3's one edge format.
         """
-        UNVISITED = -1
-        n, adj = self.n, self.adj
-        idx = [UNVISITED] * n         # DFS discovery order
-        low = [0] * n                 # lowlink
-        on_stack = [False] * n
-        comp = [UNVISITED] * n        # result: SCC id per node
-        scc_stack: List[int] = []     # Tarjan's component stack
-        next_index = 0
-        next_scc = 0
-
-        for root in range(n):
-            if idx[root] != UNVISITED:
-                continue
-            # frame = [node, edge_i]  -- how far through this node's adjacency we are.
-            call: List[List[int]] = [[root, 0]]
-
-            while call:
-                f = call[-1]
-                v = f[0]
-
-                if f[1] == 0:                     # first visit to v
-                    idx[v] = low[v] = next_index
-                    next_index += 1
-                    scc_stack.append(v)
-                    on_stack[v] = True
-
-                recursed = False
-                while f[1] < len(adj[v]):
-                    w = adj[v][f[1]][0]
-                    f[1] += 1
-                    if idx[w] == UNVISITED:
-                        call.append([w, 0])       # "recurse" into w
-                        recursed = True
-                        break
-                    elif on_stack[w]:             # back edge to a node still on stack
-                        low[v] = min(low[v], idx[w])
-                if recursed:
-                    continue
-
-                # Done with v's edges: SCC root iff lowlink == index. Pop the component.
-                if low[v] == idx[v]:
-                    while True:
-                        u = scc_stack.pop()
-                        on_stack[u] = False
-                        comp[u] = next_scc
-                        if u == v:
-                            break
-                    next_scc += 1
-
-                call.pop()                        # "return" from dfs(v)
-                if call:                          # propagate lowlink to parent
-                    parent = call[-1][0]
-                    low[parent] = min(low[parent], low[v])
-
-        return comp, next_scc
+        edges = [(u, v, w) for u in range(self.n) for v, w in self.adj[u]]
+        return scc_components(self.n, edges)
 
     # -------------------------------------------------------------------- Karp
     def _karp_max_cycle_mean(
