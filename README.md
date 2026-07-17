@@ -2,7 +2,7 @@
 
 A real-time, cross-venue market structure engine for cryptocurrency exchange rates. It builds a live directed graph of currency pairs across multiple brokers, analyses the graph's structure and dynamics, and turns that analysis into three concrete outputs: a **market health signal**, a **per-pair regime classification**, **and ML feature engineering for trading signals**.
 
-> Currently streaming Binance (BTC, ETH, BNB, SOL) over a K4 intra-venue graph, with OANDA and IBKR wired in as mock feeds pending real broker integration.
+> Done Implementing the Analysis, Live Graph, Multi Broker Order Book, Currently in ML development
 
 Disclaimer: This repo also has Claude as a big help. Hence if there exists certain errors or unreadable code, such as URLmethods.py, then excuse me.
 
@@ -12,30 +12,46 @@ Inspiration:
     Available: http://cs-www.cs.yale.edu/homes/spielman/sagt/sagt.pdf (*)
 
 [2] I. Akouaouch and A. Bouayad,
-    "An innovative approach to identifying triangular arbitrage opportunities
-    in financial markets using the Bellman-Ford algorithm."
+    "An Innovative Approach to Identifying Triangular Arbitrage Opportunities
+    in Financial Markets Using the Bellman–Ford Algorithm,"
+    Bulletin of Electrical Engineering and Informatics,
+    vol. 14, no. 3, pp. 2035–2047, 2025.
+    Available: https://beei.org/index.php/EEI/article/view/10817
 
-[3] J. Jiang,
-    "An Introduction to Spectral Graph Theory."
+[3] B. A. Mason,
+    "Tropical Algebra, Graph Theory, and Foreign Exchange,"
+    Honors Thesis,
+    James Madison University, 2020.
+    Available: https://commons.lib.jmu.edu/honors201019/304
 
-[4] B. A. Mason,
-    "Tropical Algebra, Graph Theory, and Foreign Exchange."
-
-[5] R. E. Tarjan,
+[4] R. E. Tarjan,
     "Depth-First Search and Linear Graph Algorithms,"
-    SIAM Journal on Computing, vol. 1, no. 2, pp. 146–160, 1972.
+    SIAM Journal on Computing,
+    vol. 1, no. 2, pp. 146–160, Jun. 1972.
+    doi: 10.1137/0201010.
 
-[6] S. Mallik,
+[5] S. Mallik,
     "Pricing Cryptocurrencies: Modelling the ETHBTC Spot-Quotient Variation
-    as a Diffusion Process," arXiv:2111.11609.
+    as a Diffusion Process,"
+    arXiv:2111.11609 [q-fin.ST], Nov. 2021.
+    Available: https://arxiv.org/abs/2111.11609
 
-[7] M. Fiedler,
+[6] M. Fiedler,
     "Algebraic Connectivity of Graphs,"
-    Czechoslovak Mathematical Journal, 1973.
+    Czechoslovak Mathematical Journal,
+    vol. 23, no. 2, pp. 298–305, 1973.
+    doi: 10.21136/CMJ.1973.101168.
 
-[8] Fan Chung,
-    "The Heat Kernel as the PageRank of a Graph,"
-    arXiv:0711.0189.
+[7] U. von Luxburg,
+    "A Tutorial on Spectral Clustering,"
+    arXiv:0711.0189 [cs.DS], Nov. 2007.
+    Available: https://arxiv.org/abs/0711.0189
+
+[8] J. Bang-Jensen,
+    "Finding Negative Cycles,"
+    Department of Mathematics and Computer Science,
+    University of Southern Denmark.
+    Available: https://www.imada.sdu.dk/u/jbj/DM817/Negativicyclefinding.pdf :contentReference[oaicite:0]{index=0}
 
 ---
 # In development, ML Applications
