@@ -1,0 +1,37 @@
+{
+  "created": "2026-07-15 10:45:57",
+  "fee_table": {
+    "Binance": 0.001,
+    "Coinbase Adv.": 0.006,
+    "Kraken": 0.0026,
+    "OKX": 0.001,
+    "Gemini": 0.004,
+    "Bitstamp": 0.003,
+    "default": 0.001
+  },
+  "transfer_cost": 0.0,
+  "quote_window": 0.2,
+  "max_quote_age": 1.0,
+  "min_notional": {
+    "usd": 50.0,
+    "usdt": 50.0,
+    "usdc": 50.0,
+    "eur": 50.0,
+    "gbp": 50.0,
+    "btc": 0.0005,
+    "eth": 0.02
+  },
+  "regime_fee": 0.00023,
+  "stress_mult": 5.0,
+  "interval": 0.5,
+  "n_assets": 58,
+  "venues": [
+    "Binance",
+    "Coinbase Adv.",
+    "Kraken",
+    "OKX",
+    "Gemini",
+    "Bitstamp"
+  ],
+  "note": "lam = net-of-fee (executable) arb intensity; lam_raw = fee-free. Label STRESSED off lam_raw (see feature_store/label.py --stress-quantile)."
+}

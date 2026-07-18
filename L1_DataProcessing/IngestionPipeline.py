@@ -103,7 +103,7 @@ class OrderBookDashboard:
         if not isinstance(payload, dict):
             return None
 
-        bids = payload.get("bids") or payload.get("bid") or payload.get("buy") or []
+        bids = payload.get("bids") or payload("bid") or payload.get("buy") or []
         asks = payload.get("asks") or payload.get("ask") or payload.get("sell") or []
 
         if isinstance(bids, dict):
@@ -172,6 +172,7 @@ class OrderBookDashboard:
         while self.is_running:
             try:
                 async with websockets.connect(self.stream_url) as ws:
+                    
                     if self.debug:
                         print(f"[{self.broker_name}] connected to {self.stream_url}")
                     if self.initial_message is not None:
@@ -313,6 +314,11 @@ class OrderBookDashboard:
             except KeyboardInterrupt:
                 self.is_running = False
                 print("\nShutting down.")
+                
+    @staticmethod
+    def make_pair(a, b):
+        base, quote = (b, a) if quote_priority.index(a) < quote_priority.index(b) else (a, b)
+        return f"{base}{quote}"
 
 
 if __name__ == "__main__":
@@ -320,11 +326,7 @@ if __name__ == "__main__":
     quote_priority = ["btc", "eth", "bnb", "sol"]
     assets = ["btc", "eth", "bnb", "sol"]
 
-    def make_pair(a, b):
-        base, quote = (b, a) if quote_priority.index(a) < quote_priority.index(b) else (a, b)
-        return f"{base}{quote}"
-
-    my_pairs = [make_pair(a, b) for a, b in combinations(assets, 2)]
+    my_pairs = [OrderBookDashboard.make_pair(a, b) for a, b in combinations(assets, 2)]
 
     refresh_rate = 0.05
     url = (

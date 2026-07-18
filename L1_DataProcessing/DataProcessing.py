@@ -287,7 +287,7 @@ class ExchangeRateGraph:
                 attrs["weight"] = -math.log(attrs["rate"])
         return self
 
-    # --------------------------------------------------- graph theory
+    # --------------------------------------------------- graph theory part :)
     def nodes(self) -> List[Node]: #compilation of all the nodes
         return sorted(self.adjacency.keys())
 

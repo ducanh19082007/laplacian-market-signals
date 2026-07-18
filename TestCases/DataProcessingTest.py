@@ -72,9 +72,6 @@ class TestToFloat:
         assert _to_float([1, 2]) is None
 
 
-# --------------------------------------------------------------------------- #
-# construction / config                                                       #
-# --------------------------------------------------------------------------- #
 class TestInit:
     def test_lowercases_and_defaults(self):
         g = ExchangeRateGraph(
@@ -380,8 +377,6 @@ class TestBuildFromSnapshot:
         # Binance pairs should be completely pruned/absent due to staleness
         assert ("eth", "Binance") not in g.adjacency
         assert ("xrp", "Binance") not in g.adjacency
-
-class TestAddTransferEdges
 
 class TestLogTransform:
     def test_weight_is_negative_log_rate(self):
