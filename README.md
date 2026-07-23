@@ -54,7 +54,25 @@ Inspiration:
     Available: https://www.imada.sdu.dk/u/jbj/DM817/Negativicyclefinding.pdf :contentReference[oaicite:0]{index=0}
 
 ---
+# Bug Fixed, Major Bug fix explaination:
+
+This bug is found when i was implementing ML and i noticed on how the first part of the data works very well and the later just stops. So i dive deeper and noticed the previous data i used was extremely corrupted at a certain long period of time when i was first recorded, noticably that the nodes went through and go down from (N -> M) as $n >> m$
+
+Root cause (1 bug, IngestionPipeline.py): when a venue's websocket dropped, the receive loop caught the error, slept 1s, and retried recv() on the same dead socket forever — it never broke out to the reconnect path. Exchanges drop connections routinely, so once any venue disconnected, it stayed dead for the rest of the run.
+
+How that corrupted the data:
+
+Dead venue → its assets lose fresh quotes → drop out of the graph → n_nodes bleeds downward over long runs (e.g. 210207: 91 → 24 nodes).
+A sparse graph splits into disconnected pieces → n_components ≥ 2 → falsely labeled FRAGMENTING.
+Proof it was an artifact: fragmentation rate was 50% when n_nodes<20 but 0.3% when n_nodes≥80 (corr −0.34); and when I gated the forecast on healthy-feed ticks, its "skill" vanished (AUC 0.69 → 0.5, p = 0.60). The ML was learning "the feed is dying," not market structure.
+Second error, which my reconnect fix exposed: the Gemini extractor accumulates its order book with no reset and no snapshot flag. Once reconnects actually happen, a fresh snapshot merges onto the stale book → ghost top-of-book → phantom arb. Fixed with reset-on-reconnect on all stateful extractors.
+
+Two minor bugs: payload("bid") typo (a dict called as a function, dropped one-sided book frames) and the mock feed never setting a timestamp.
+
+---
 # In development, ML Applications
+
+From the recent Isolation Forest Implementation, i discovers that i might be able to 
 
 ML Model planned to added for efficient detections:
 1. Anomaly detection on market state ( isolation forest, an autoencoder's reconstruction error, or even a rolling Mahalanobis distance)
