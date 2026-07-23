@@ -150,6 +150,7 @@ class URL_methods:
                     }
             return None
 
+        extractor.reset = books.clear          # pipeline clears state on reconnect
         return extractor
 
     # -------------------------------------------------------------------------
@@ -272,6 +273,7 @@ class URL_methods:
                 }
             return None
 
+        extractor.reset = books.clear          # pipeline clears state on reconnect
         return extractor
 
     # -------------------------------------------------------------------------
@@ -440,6 +442,12 @@ class URL_methods:
                 "asks": list(book["asks"].items()),
             }
 
+        # CRITICAL for reconnects: Gemini has NO snapshot/update flag, so this closure
+        # only ever ACCUMULATES. On reconnect the fresh snapshot would merge onto the
+        # book retained from the dead socket, and any level that changed silently during
+        # the gap would linger as a ghost top-of-book (phantom arb / false fragmentation).
+        # The pipeline calls reset() on every (re)connect so the snapshot rebuilds clean.
+        extractor.reset = books.clear
         return extractor
 
     # -------------------------------------------------------------------------

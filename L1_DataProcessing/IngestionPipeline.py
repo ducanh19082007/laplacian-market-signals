@@ -28,6 +28,8 @@ class OrderBookDashboard:
         initial_message: Optional[Any] = None,
         debug=True,
         max_quote_age: Optional[float] = None,
+        stall_timeout: float = 20.0,
+        reconnect_delay: float = 2.0,
     ):
         self.pairs = [self._normalize_symbol(p) for p in pairs]
         self.refresh_interval = refresh_interval
@@ -41,6 +43,12 @@ class OrderBookDashboard:
         # Quotes older than this (seconds) are treated as N/A. None = never expire.
         # and also the order_book and order_book_ts is our output
         self.max_quote_age = max_quote_age
+        # Overnight resilience (see _listen). stall_timeout: if no frame arrives within
+        # this many seconds the socket is treated as silently half-open and force-
+        # reconnected -- this is what stops a venue vanishing mid-run and the graph
+        # fragmenting falsely. reconnect_delay: pause before a fresh connect attempt.
+        self.stall_timeout = stall_timeout
+        self.reconnect_delay = reconnect_delay
         self.is_running = True
         self.stream_url = stream_url
         self.broker_name = broker_name
@@ -103,7 +111,7 @@ class OrderBookDashboard:
         if not isinstance(payload, dict):
             return None
 
-        bids = payload.get("bids") or payload("bid") or payload.get("buy") or []
+        bids = payload.get("bids") or payload.get("bid") or payload.get("buy") or []
         asks = payload.get("asks") or payload.get("ask") or payload.get("sell") or []
 
         if isinstance(bids, dict):
@@ -169,46 +177,87 @@ class OrderBookDashboard:
         if websockets is None:
             raise RuntimeError("websockets package is required for _listen()")
 
+        # Reconnect loop. Each pass opens a FRESH socket and re-subscribes, so any
+        # drop (server close, half-open TCP, a transient error) is recovered from
+        # instead of silently killing this venue for the rest of the run -- the old
+        # code caught a receive error, slept, then retried recv() on the DEAD socket
+        # forever, so once a venue dropped it never came back and its assets aged out
+        # of the graph (the node-count decay that faked "FRAGMENTING" over long runs).
         while self.is_running:
             try:
-                async with websockets.connect(self.stream_url) as ws:
-                    
+                # ping_interval keeps the socket alive through NAT/proxies AND lets the
+                # library detect a dead peer (no pong within ping_timeout -> close ->
+                # our recv raises -> we reconnect). max_size=None so an unusually large
+                # full-book frame can't tear the connection down mid-run.
+                async with websockets.connect(
+                    self.stream_url,
+                    ping_interval=20,
+                    ping_timeout=20,
+                    close_timeout=5,
+                    max_size=None,
+                ) as ws:
                     if self.debug:
                         print(f"[{self.broker_name}] connected to {self.stream_url}")
+                    # Fresh socket => drop any book a STATEFUL extractor accumulated on the
+                    # PREVIOUS connection, so the incoming snapshot rebuilds cleanly instead
+                    # of merging onto levels that changed silently during the disconnect
+                    # (Gemini has no snapshot flag, so a stale ghost level would otherwise
+                    # persist as a bad top-of-book). Stateless extractors have no .reset.
+                    reset = getattr(self.payload_extractor, "reset", None)
+                    if callable(reset):
+                        reset()
                     if self.initial_message is not None:
                         # A list means "send each message in turn" -- some venues/brokers
                         # (e.g. Bitstamp) require one subscribe frame per channel,
                         # while others (Kraken/OKX/Coinbase/Gemini) batch every
-                        # symbol into a single frame. Both are handled here.
+                        # symbol into a single frame. Both are handled here. This runs on
+                        # EVERY (re)connect, so a reconnect restores all subscriptions.
                         messages = (self.initial_message if isinstance(self.initial_message, list) else [self.initial_message])
                         for msg in messages:
                             await ws.send(json.dumps(msg))
                             if self.debug:
                                 print(f"[{self.broker_name}] sent initial subscription: {msg}")
-                                
+
                     while self.is_running:
+                        # 1) GET a frame. A stall (no data for stall_timeout s) OR a
+                        #    ConnectionClosed both mean this socket is no longer usable,
+                        #    so BREAK out to the reconnect loop above -- do NOT keep
+                        #    polling a dead socket. wait_for is the watchdog that catches
+                        #    a SILENTLY half-open connection (TCP alive, no data), which
+                        #    a bare recv() would wait on forever.
                         try:
-                            raw_data = await ws.recv() #await until receive the raw message
-                            data = json.loads(raw_data) #after that, loads the received message into JSON
-                            extractor = self.payload_extractor or self._default_payload_extractor #either uses the onei build or the one
-                            #available in MultiVenueFeed.py URLmethods methods
+                            raw_data = await asyncio.wait_for(ws.recv(), timeout=self.stall_timeout)
+                        except asyncio.TimeoutError:
+                            if self.debug:
+                                print(f"[{self.broker_name}] no data for {self.stall_timeout}s -- reconnecting")
+                            break
+                        except Exception as exc:
+                            if self.debug:
+                                print(f"[{self.broker_name}] connection closed: {repr(exc)} -- reconnecting")
+                            break
+
+                        # 2) PARSE + store. A single malformed frame must NOT kill the
+                        #    socket, so a parse/extract error just skips that frame
+                        #    (continue) and keeps the connection.
+                        try:
+                            data = json.loads(raw_data)
+                            extractor = self.payload_extractor or self._default_payload_extractor
                             result = extractor(data)
                             if result is not None:
                                 key, payload = result
                                 normalized_key = self._normalize_symbol(key)
-                                self.order_books[normalized_key] = payload #store order book
-                                self.order_book_ts[normalized_key] = time.time() #store timestamp
-                                #such that the two dictionary that have normalized_key keys corresponds
+                                self.order_books[normalized_key] = payload      # store order book
+                                self.order_book_ts[normalized_key] = time.time() # store timestamp
                             elif self.debug:
                                 print(f"[{self.broker_name}] ignored message: {data}")
                         except Exception as exc:
                             if self.debug:
-                                print(f"[{self.broker_name}] receive error: {repr(exc)}")
-                            await asyncio.sleep(1)
+                                print(f"[{self.broker_name}] parse error (frame skipped): {repr(exc)}")
+                            continue
             except Exception as exc:
                 if self.debug:
-                    print(f"[{self.broker_name}] connect error: {repr(exc)}")
-                await asyncio.sleep(5)
+                    print(f"[{self.broker_name}] connect error: {repr(exc)} -- retrying in {self.reconnect_delay}s")
+                await asyncio.sleep(self.reconnect_delay)
 
     #dont have to worry about this if one doesn't want to use mock data
     def _mock_loop(self):
@@ -224,6 +273,7 @@ class OrderBookDashboard:
                     "bids": [[bid, round(rng.uniform(1, 10), 4)]],
                     "asks": [[ask, round(rng.uniform(1, 10), 4)]],
                 }
+                self.order_book_ts[pair] = time.time()   # else max_quote_age sees mock data as stale
             time.sleep(self.refresh_interval)
 
     def _start_async_loop(self):

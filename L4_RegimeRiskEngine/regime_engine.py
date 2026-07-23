@@ -206,7 +206,8 @@ def detect_cycles(g, min_profit: float = 0.0) -> list:
 # ===========================================================================
 def sampler_loop(feed, state: RegimeState, args, render_table: bool, store=None) -> None:
     tau = fee_threshold(args.fee)
-    while not state.stop.is_set():  
+    n_venues = len(feed.dashboards)
+    while not state.stop.is_set():
         now = time.monotonic()
         g = feed.build_graph()
         if g is None:
@@ -222,18 +223,32 @@ def sampler_loop(feed, state: RegimeState, args, render_table: bool, store=None)
         # negative examples ML needs, so they are context to keep, not noise to delete.
         cycles = detect_cycles(g, getattr(args, "min_profit", 0.0))
 
-        if store is not None:                   # improvement B: one JSONL row per tick
+        # OBSERVATION CONFIDENCE / feed-health gate. venues_live = how many DISTINCT
+        # venues put at least one live node on the graph this tick. This measures
+        # SOURCE liveness (are the sockets delivering?), NOT market activity -- a
+        # genuinely quiet market still has all its venues live, so it stays recordable,
+        # whereas a feed that has LOST venues (dead sockets) is only partially observed
+        # and its graph fragments falsely. We keep BUILDING + SHOWING the graph either
+        # way; we only RECORD a tick when enough venues are live, so a degraded feed can
+        # still be watched but never poisons the dataset (the overnight-corruption bug).
+        venues_live = len({node[1] for node in g.nodes()})
+        gate_on = not getattr(args, "no_record_gate", False)
+        record_ok = (venues_live >= args.min_fresh_venues) if gate_on else True
+
+        if store is not None and record_ok:     # improvement B: one JSONL row per tick
             store.append({
                 "ts": time.time(),              # absolute wall clock -> concat sessions + forward labels
                 "t": r.t,                       # seconds since this run started
                 "regime": r.regime,             # live LABEL (net-of-fee); dashboard convenience only
                 "lam": r.lam,                   # NET arb intensity (per-hop log-return); null when NaN
                 "lam_raw": r.lam_raw,           # FEE-FREE arb intensity -> label STRESSED off THIS offline
-                "fiedler": r.fiedler,
-                "connectivity": r.connectivity,
-                "strain": r.strain,             # inf -> null
+                "fiedler": r.fiedler,           # lambda_2 (algebraic connectivity); 0 when the graph splits
+                "strain": r.strain,             # 1/lambda_2 (inf -> null)
+                # `connectivity` dropped from the log: it equals fiedler whenever the graph
+                # is connected (~94% of ticks) and only diverges when split -- redundant.
                 "n_components": r.n_components,
                 "n_nodes": r.n_nodes,
+                "n_venues_live": venues_live,   # FEED-HEALTH field -- check this after a long run
                 "cycles": cycles,
             })
 
@@ -263,6 +278,8 @@ def sampler_loop(feed, state: RegimeState, args, render_table: bool, store=None)
                 f"  arb intensity  : lambda  = {_fmt(r.lam * 100)}%/hop  (stress> {tau*args.stress_mult*100:.4f}%)",
                 f"  connectivity   : lambda2 = {_fmt(r.fiedler)}   strain = {_fmt(r.strain, 1)}",
                 f"  graph          : {r.n_nodes} nodes / {r.n_components} component(s)",
+                f"  feed health    : {venues_live}/{n_venues} venues live   "
+                f"REC {'ON' if record_ok else 'PAUSED (thin feed)'}",
                 "-" * 20, f"ARB CYCLES [{r.regime}]:"]
             if cycles:
                 right += [f"  {c['profit_pct']:+.4f}%  " + " -> ".join(c["path"]) for c in cycles[:6]]
@@ -275,6 +292,7 @@ def sampler_loop(feed, state: RegimeState, args, render_table: bool, store=None)
         elif not getattr(args, "headless_quiet", False):
             print(f"[{time.strftime('%H:%M:%S')}] {r.regime:11s}  lambda={_fmt(r.lam * 100)}%/hop  "
                   f"lambda2={_fmt(r.fiedler)}  strain={_fmt(r.strain, 1)}  comps={r.n_components}  "
+                  f"venues={venues_live}/{n_venues}  rec={'Y' if record_ok else 'n'}  "
                   f"cycles={len(cycles)}",
                   flush=True)
 
@@ -474,6 +492,13 @@ def main() -> None:
     ap.add_argument("--no-store", action="store_true", help="do NOT write the feature-store JSONL log")
     ap.add_argument("--store-path", default=None,
                     help="feature-store JSONL path (default: data/regime_<timestamp>.jsonl)")
+    # feed-health RECORD gate: only WRITE a tick when enough venues are live, so a
+    # degraded feed (dead sockets) can still be watched but never poisons the dataset.
+    ap.add_argument("--min-fresh-venues", type=int, default=3, dest="min_fresh_venues",
+                    help="record a tick only if at least this many venues are live "
+                         "(feed-health gate against overnight data corruption; default 3)")
+    ap.add_argument("--no-record-gate", action="store_true", dest="no_record_gate",
+                    help="disable the feed-health gate and record EVERY tick (not advised for long runs)")
     args = ap.parse_args()
     args.headless_quiet = False
 
@@ -518,6 +543,8 @@ def main() -> None:
             "regime_fee": args.fee,              # tau used by the LIVE classifier (dashboard only)
             "stress_mult": args.stress_mult,
             "interval": args.interval,
+            "min_fresh_venues": args.min_fresh_venues,   # feed-health record gate
+            "record_gate": not args.no_record_gate,
             "n_assets": len(feed.assets or []),
             "venues": [b.name for b, _ in feed.dashboards],
             "note": "lam = net-of-fee (executable) arb intensity; lam_raw = fee-free. "
@@ -547,7 +574,10 @@ def main() -> None:
         time.sleep(0.2)
         if store is not None:
             store.close()
-            print(f"[feature store] wrote {store.rows} rows -> {store.path}")
+            seen = len(state.times)
+            gated = max(0, seen - store.rows)
+            note = f"  ({gated} thin-feed ticks NOT recorded)" if gated else ""
+            print(f"[feature store] wrote {store.rows} of {seen} scored ticks -> {store.path}{note}")
 
 
 if __name__ == "__main__":
