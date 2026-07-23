@@ -14,3 +14,7 @@ ou_backtest.png
 ou_rolling.gif
 ou_live_backtest.png
 ou_live_rolling.gif
+
+# L5 anomaly-forest trained artifacts + demo render (retrain: anomaly_forest.py --train)
+models/
+anomaly_demo.png
